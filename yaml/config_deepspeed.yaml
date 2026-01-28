@@ -1,0 +1,83 @@
+# USM-AA Pretraining Configuration - DeepSpeed Version
+# Optimized for large model training, supports ZeRO-2/ZeRO-3
+
+# Data configuration
+data:
+  # Dataset type: refseq | dna | 1kg | combined
+  dataset_type: refseq
+  
+  # Data file paths
+  ref_file: path/to/hg38.fa
+  dna_file: null
+  n1kg_file: null
+  
+  # Sequence parameters
+  seq_len: 256
+  
+  # Sampling weights for each data source (combined mode only)
+  sample_weights:
+    ref: 1.0
+
+
+# Model configuration
+model:
+  type: usm-aa-100m  # usm-aa-100m, usm-aa-500m, usm-aa-1b
+
+# Tokenizer configuration
+tokenizer:
+  kmer: 6
+  dynamic: true
+  special_tokens:
+    - <pad>
+    - <mask>
+    - <INS-S>
+    - <INS-E>
+    - <DEL-S>
+    - <DEL-E>
+    - <DUP-S>
+    - <DUP-E>
+    - <INV-S>
+    - <INV-E>
+    - <TRA-S>
+    - <TRA-E>
+    - <5mC>
+    - <R1>
+    - <R2>
+    - <R3>
+    - <R4>
+    - <R5>
+    - <R6>
+
+# Training configuration
+training:
+  batch_size: 160           # Per GPU batch size
+  num_epochs: 20
+  learning_rate: 1.0e-4
+  weight_decay: 0.1
+  warmup_steps: 10000
+  grad_clip: 1.0
+  mask_ratio: 0.15
+  rc_ratio: 0.3
+  gradient_accumulation_steps: 1  # DeepSpeed gradient accumulation
+
+# DataLoader configuration
+dataloader:
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: true
+
+# Precision configuration
+precision:
+  bf16: true                # Recommended bf16
+  fp16: false
+  activation_checkpoint: true
+
+# Logging and checkpointing
+logging:
+  output_dir: ../models/usm-aa-100m
+  log_freq: 5
+  save_freq: 200
+
+# Distributed training
+distributed:
+  backend: nccl

@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Models and checkpoints
+models/
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+weight/
+
+# Data
+*.fa
+*.fasta
+*.jsonl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+logs/
+runs/
+wandb/
+
+# Misc
+.DS_Store
+*.tmp

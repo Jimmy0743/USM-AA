@@ -324,26 +324,3 @@ def print_model_info(model: USMAAModel, config: USMAAConfig):
     print(f"Num layers: {config.num_layers}")
     print(f"Num heads: {config.num_heads}")
 
-
-if __name__ == "__main__":
-    # Demo usage
-    print("=" * 50)
-    print("Build Model Demo")
-    print("=" * 50)
-    
-    # Build tokenizer
-    tokenizer = build_tokenizer(kmer=6, dynamic=True)
-    print(f"Tokenizer vocab size: {len(tokenizer)}")
-    
-    # Build model directly
-    model, config = build_model(
-        vocab_size=len(tokenizer),
-        model_type="usm-aa-100m",
-    )
-    print_model_info(model, config)
-    
-    # Test forward
-    batch_size, seq_len = 2, 128
-    input_ids = torch.randint(0, len(tokenizer), (batch_size, seq_len))
-    outputs = model(input_ids)
-    print(f"Output shape: {outputs.last_hidden_state.shape}")

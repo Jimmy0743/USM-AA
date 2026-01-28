@@ -294,20 +294,3 @@ def build_tokenizer(
     )
 
 
-if __name__ == "__main__":
-    # Test tokenizer
-    tokenizer = build_tokenizer(kmer=6, dynamic=True)
-    print(f"Vocab size: {len(tokenizer)}")
-    print(f"BOS: {tokenizer.bos}, EOS: {tokenizer.eos}, PAD: {tokenizer.pad}, MASK: {tokenizer.mask}")
-    
-    # Encoding test
-    seq = "ATCGATCGATCG"
-    tokens = tokenizer(seq, bos=True, eos=True)
-    print(f"Sequence: {seq}")
-    print(f"Tokens: {tokens}")
-    print(f"Decoded: {tokenizer.decode(tokens)}")
-    
-    # Reverse complement test
-    rc_tokens = [tokenizer.get_reverse_complement_token(t.item()) for t in tokens]
-    print(f"RC tokens: {rc_tokens}")
-    print(f"RC decoded: {tokenizer.decode(torch.tensor(rc_tokens[::-1]))}")

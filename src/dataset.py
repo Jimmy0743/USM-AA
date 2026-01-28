@@ -789,12 +789,4 @@ class USMAAPretrainDataset(Dataset):
         return self.datasets[0].collate_fn(batch)
 
 
-if __name__ == "__main__":
-    # Test tokenizer
-    tokenizer = build_tokenizer(kmer=6, dynamic=True)
-    print(f"Vocab size: {len(tokenizer)}")
-    
-    # Test sequence encoding
-    seq = "ATCGATCGATCG"
-    tokens = tokenizer(seq, bos=True, eos=True)
-    print(f"Tokens: {tokens}")
+

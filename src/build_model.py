@@ -1,4 +1,3 @@
-# Copyright (c) 2025, Tencent Inc. All rights reserved.
 # Unified model and tokenizer builder for USM-AA
 """
 Usage:

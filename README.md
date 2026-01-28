@@ -10,6 +10,44 @@ conda activate usmaa
 pip install -r requirements.txt
 ```
 
+## Data Preparation
+
+Data processing scripts are located in the `dataprocess/` directory.
+
+### 1. HG38 Reference Genome
+
+Process GRCh38 human reference genome.
+
+```bash
+python dataprocess/prepare_ref.py
+```
+
+- **Input**: `path/to/grch38.fasta`
+- **Output**: `data/ref.fasta` + `data/ref.fasta.idx`
+
+### 2. 1000 Genomes
+
+Extract SNP and INDEL variants from 1000 Genomes Project VCF files.
+
+```bash
+python dataprocess/prepare_1kg.py
+```
+
+- **Input**: 1000 Genomes phased VCF directory
+- **Output**: `data/1kg/1kg.jsonl` + `data/1kg/1kg.jsonl.idx`
+- **Format**: Each record contains `sample_id`, `chrom`, `variants` (list of variant positions)
+
+### 3. Multi-species DNA
+
+Process multi-species DNA sequences for pretraining.
+
+```bash
+python dataprocess/prepare_dna.py
+```
+
+- **Input**: `dnabert/train.txt` (one DNA sequence per line)
+- **Output**: `train.jsonl` + `train.jsonl.idx`
+
 ## Training
 
 ### DDP Training

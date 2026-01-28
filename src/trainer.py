@@ -1,5 +1,4 @@
-# Copyright (c) 2025, Tencent Inc. All rights reserved.
-# USM-AA Pretraining Script - Standalone implementation without tgnn dependency
+# USM-AA Pretraining Script - DeepSpeed Version
 import argparse
 import math
 import os
@@ -9,12 +8,8 @@ from pathlib import Path
 
 import yaml
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
+import deepspeed
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
@@ -43,7 +38,7 @@ except ImportError:
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="USM-AA Pretraining")
+    parser = argparse.ArgumentParser(description="USM-AA Pretraining with DeepSpeed")
     
     # Config file
     parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
@@ -56,14 +51,11 @@ def get_args():
     parser.add_argument("--dna_file", type=str, default=None, help="Multi-species DNA JSONL file")
     parser.add_argument("--n1kg_file", type=str, default=None, help="1KG variants JSONL file")
     parser.add_argument("--seq_len", type=int, default=None, help="Sequence length")
-    parser.add_argument("--sample_weights", type=str, default=None, 
-                       help="Sampling weights as JSON string, e.g., '{\"ref\":1.0,\"dna\":0.5}'")
     
     # Model arguments
     parser.add_argument("--model_type", type=str, default=None, 
                        choices=["usm-aa-100m", "usm-aa-500m", "usm-aa-1b"])
     parser.add_argument("--checkpoint", type=str, default=None, help="Resume from checkpoint")
-    parser.add_argument("--pretrained", type=str, default=None, help="Load pretrained weights (safetensors/pt)")
     
     # Training arguments
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size per GPU")
@@ -74,6 +66,7 @@ def get_args():
     parser.add_argument("--grad_clip", type=float, default=None, help="Gradient clipping")
     parser.add_argument("--mask_ratio", type=float, default=None, help="MLM mask ratio")
     parser.add_argument("--rc_ratio", type=float, default=None, help="Reverse complement ratio")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
     
     # System arguments
     parser.add_argument("--num_workers", type=int, default=None, help="DataLoader workers")
@@ -84,17 +77,13 @@ def get_args():
     parser.add_argument("--fp16", action="store_true", help="Use float16")
     parser.add_argument("--activation_checkpoint", action="store_true", help="Use activation checkpointing")
     
-    # Distributed arguments
+    # DeepSpeed arguments
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
+    parser.add_argument("--deepspeed", type=str, default=None, help="DeepSpeed config file path")
     
     args = parser.parse_args()
     
-    # Parse sample_weights from JSON string if provided
-    if args.sample_weights and isinstance(args.sample_weights, str):
-        import json
-        args.sample_weights = json.loads(args.sample_weights)
-    
-    # Load defaults from yaml config
+    # Load defaults from yaml config file
     if args.config:
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
@@ -111,8 +100,7 @@ def get_args():
             args.n1kg_file = data_cfg.get('n1kg_file')
         if args.seq_len is None:
             args.seq_len = data_cfg.get('seq_len', 256)
-        if args.sample_weights is None:
-            args.sample_weights = data_cfg.get('sample_weights', {"ref": 1.0, "dna": 1.0, "n1kg": 1.0})
+        args.sample_weights = data_cfg.get('sample_weights', {"ref": 1.0})
         
         # Model config
         model_cfg = cfg.get('model', {})
@@ -137,6 +125,8 @@ def get_args():
             args.mask_ratio = train_cfg.get('mask_ratio', 0.15)
         if args.rc_ratio is None:
             args.rc_ratio = train_cfg.get('rc_ratio', 0.3)
+        if args.gradient_accumulation_steps == 1:
+            args.gradient_accumulation_steps = train_cfg.get('gradient_accumulation_steps', 1)
         
         # DataLoader config
         loader_cfg = cfg.get('dataloader', {})
@@ -161,13 +151,13 @@ def get_args():
         if args.save_freq is None:
             args.save_freq = log_cfg.get('save_freq', 5000)
     
-    # Set defaults if not specified
+    # Set defaults (if no config file and not specified via command line)
     if args.dataset_type is None:
         args.dataset_type = 'refseq'
     if args.seq_len is None:
         args.seq_len = 256
-    if args.sample_weights is None:
-        args.sample_weights = {"ref": 1.0, "dna": 1.0, "n1kg": 1.0}
+    if not hasattr(args, 'sample_weights'):
+        args.sample_weights = {"ref": 1.0}
     if args.model_type is None:
         args.model_type = 'usm-aa-100m'
     if args.batch_size is None:
@@ -248,35 +238,6 @@ def build_dataset(args, tokenizer):
     return dataset
 
 
-def setup_distributed():
-    """Initialize distributed training"""
-    if "RANK" in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ["LOCAL_RANK"])
-    else:
-        rank = 0
-        world_size = 1
-        local_rank = 0
-    
-    if world_size > 1:
-        dist.init_process_group(backend="nccl")
-        torch.cuda.set_device(local_rank)
-    
-    return rank, world_size, local_rank
-
-
-def get_lr_scheduler(optimizer, warmup_steps: int, total_steps: int):
-    """Warmup + Cosine learning rate scheduler"""
-    def lr_lambda(step):
-        if step < warmup_steps:
-            return step / warmup_steps
-        progress = (step - warmup_steps) / (total_steps - warmup_steps)
-        return 0.5 * (1 + math.cos(math.pi * progress))
-    
-    return LambdaLR(optimizer, lr_lambda)
-
-
 class MLMLoss(torch.nn.Module):
     """Masked Language Model Loss"""
     
@@ -319,11 +280,10 @@ class MLMLoss(torch.nn.Module):
 
 
 def train_epoch(
-    model, dataloader, optimizer, scheduler, scaler, 
-    criterion, device, epoch, args, writer, global_step
+    model_engine, dataloader, criterion, device, epoch, args, writer, global_step
 ):
-    """Train one epoch"""
-    model.train()
+    """Train one epoch (DeepSpeed version)"""
+    model_engine.train()
     total_loss = 0
     total_acc = 0
     num_batches = 0
@@ -333,56 +293,36 @@ def train_epoch(
     log_start_time = time.time()
     
     for batch_idx, (inputs, targets) in enumerate(dataloader):
+        # Determine model dtype
+        model_dtype = torch.bfloat16 if args.bf16 else (torch.float16 if args.fp16 else torch.float32)
+        
         # Move data to GPU
         token_ids = inputs["token_ids"].to(device)
         chr_ids = inputs["chr_ids"].to(device)
         position_ids = inputs["position_ids"].to(device)
         strand_ids = inputs["strand_ids"].to(device)
         cigar_ids = inputs["cigar_ids"].to(device)
-        seq_mask = inputs["seq_mask"].to(device)
+        seq_mask = inputs["seq_mask"].to(device, dtype=model_dtype)
         
         labels = targets["labels"].to(device)
         mask = targets["mask"].to(device)
         
-        optimizer.zero_grad()
+        # Forward pass (DeepSpeed handles mixed precision automatically)
+        outputs = model_engine.forward_mlm(
+            token_ids=token_ids,
+            position_ids=position_ids,
+            chr_ids=chr_ids,
+            strand_ids=strand_ids,
+            cigar_ids=cigar_ids,
+            attention_mask=seq_mask
+        )
+        logits = outputs["logits"]
+        loss, acc = criterion(logits, labels, mask)
         
-        # Forward pass
-        with autocast(enabled=args.bf16 or args.fp16, dtype=torch.bfloat16 if args.bf16 else torch.float16):
-            # Use forward_mlm for pretraining (returns logits)
-            if isinstance(model, DDP):
-                outputs = model.module.forward_mlm(
-                    input_ids=token_ids,
-                    position_ids=position_ids,
-                    chr_ids=chr_ids,
-                    strand_ids=strand_ids,
-                    cigar_ids=cigar_ids,
-                    attention_mask=seq_mask.float()
-                )
-            else:
-                outputs = model.forward_mlm(
-                    input_ids=token_ids,
-                    position_ids=position_ids,
-                    chr_ids=chr_ids,
-                    strand_ids=strand_ids,
-                    cigar_ids=cigar_ids,
-                    attention_mask=seq_mask.float()
-                )
-            logits = outputs["logits"]
-            loss, acc = criterion(logits, labels, mask)
+        # Backward pass (DeepSpeed handles gradient scaling and accumulation automatically)
+        model_engine.backward(loss)
+        model_engine.step()
         
-        # Backward pass
-        if scaler is not None:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            optimizer.step()
-        
-        scheduler.step()
         global_step += 1
         
         total_loss += loss.item()
@@ -393,10 +333,9 @@ def train_epoch(
         if global_step % args.log_freq == 0:
             elapsed = time.time() - log_start_time
             avg_loss = total_loss / num_batches
-            lr = scheduler.get_last_lr()[0]
+            lr = model_engine.get_lr()[0]
             current_time = datetime.now().strftime("%m-%d %H:%M:%S")
             
-            # Format: [time] Epoch X | Step Y/Z | Loss | LR | elapsed
             print_rank_0(
                 f"[{current_time}] Epoch {epoch} | Step {batch_idx + 1}/{total_batches} | "
                 f"Loss: {avg_loss:.4f} | LR: {lr:.2e} | {elapsed:.1f}s"
@@ -409,8 +348,8 @@ def train_epoch(
             log_start_time = time.time()
         
         # Save checkpoint
-        if global_step % args.save_freq == 0 and (not dist.is_initialized() or dist.get_rank() == 0):
-            save_checkpoint(model, optimizer, scheduler, epoch, global_step, args)
+        if global_step % args.save_freq == 0:
+            save_checkpoint(model_engine, epoch, global_step, args)
     
     epoch_time = time.time() - start_time
     avg_loss = total_loss / num_batches
@@ -419,47 +358,50 @@ def train_epoch(
     return avg_loss, avg_acc, global_step, epoch_time
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, global_step, args):
+def save_checkpoint(model_engine, epoch, global_step, args):
     """Save checkpoint (safetensors only)"""
     save_dir = Path(args.output_dir) / "checkpoints"
     save_dir.mkdir(parents=True, exist_ok=True)
     
-    # Get model state
-    if isinstance(model, DDP):
-        model_state = model.module.state_dict()
-    else:
-        model_state = model.state_dict()
-    
-    # Save safetensors format model weights
-    safetensors_path = save_dir / f"model_step{global_step}.safetensors"
-    save_safetensors(model_state, str(safetensors_path))
-    print_rank_0(f"Saved safetensors: {safetensors_path}")
+    # Save safetensors format model weights (rank 0 only)
+    rank = int(os.environ.get("RANK", 0))
+    if rank == 0:
+        # Get model state (remove module. prefix)
+        model_state = model_engine.module.state_dict()
+        safetensors_path = save_dir / f"model_step{global_step}.safetensors"
+        save_safetensors(model_state, str(safetensors_path))
+        print_rank_0(f"Saved safetensors: {safetensors_path}")
 
 
-def load_checkpoint(path, model, optimizer=None, scheduler=None):
-    """Load checkpoint"""
-    checkpoint = torch.load(path, map_location="cpu")
+def load_checkpoint(model_engine, args):
+    """Load DeepSpeed checkpoint"""
+    load_dir = Path(args.checkpoint)
     
-    if isinstance(model, DDP):
-        model.module.load_state_dict(checkpoint["model"])
-    else:
-        model.load_state_dict(checkpoint["model"])
+    if load_dir.is_dir():
+        # DeepSpeed checkpoint directory
+        _, client_state = model_engine.load_checkpoint(str(load_dir.parent), str(load_dir.name))
+        if client_state:
+            return client_state.get("epoch", 0), client_state.get("global_step", 0)
     
-    if optimizer is not None and "optimizer" in checkpoint:
-        optimizer.load_state_dict(checkpoint["optimizer"])
-    
-    if scheduler is not None and "scheduler" in checkpoint:
-        scheduler.load_state_dict(checkpoint["scheduler"])
-    
-    return checkpoint.get("epoch", 0), checkpoint.get("global_step", 0)
+    return 0, 0
 
 
 def main():
     args = get_args()
     
-    # Distributed setup
-    rank, world_size, local_rank = setup_distributed()
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    # Load yaml config for deepspeed settings
+    cfg = {}
+    if args.config:
+        with open(args.config, 'r') as f:
+            cfg = yaml.safe_load(f)
+    
+    # DeepSpeed initialize distributed
+    deepspeed.init_distributed()
+    
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    device = torch.device(f"cuda:{local_rank}")
     
     # Create output directory
     if rank == 0:
@@ -473,15 +415,12 @@ def main():
     dataset = build_dataset(args, tokenizer)
     
     # DataLoader
-    if world_size > 1:
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    else:
-        sampler = None
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=(sampler is None),
+        shuffle=False,
         sampler=sampler,
         num_workers=args.num_workers,
         collate_fn=dataset.collate_fn,
@@ -493,40 +432,104 @@ def main():
     model, config = build_model(
         vocab_size=len(tokenizer),
         model_type=args.model_type,
-        pretrained_path=args.pretrained,
-        device=device,
     )
     print_model_info(model, config)
     
-    # Distributed model
-    if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    # Compute total_steps
+    total_steps = len(dataloader) * args.num_epochs // args.gradient_accumulation_steps
     
-    # Optimizer
-    optimizer = AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        betas=(0.9, 0.95)
+    # DeepSpeed config - load from yaml if available
+    ds_config_from_yaml = cfg.get('deepspeed', {})
+    
+    ds_config = {
+        "train_batch_size": args.batch_size * world_size * args.gradient_accumulation_steps,
+        "train_micro_batch_size_per_gpu": args.batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "gradient_clipping": ds_config_from_yaml.get("gradient_clipping", args.grad_clip),
+        "prescale_gradients": ds_config_from_yaml.get("prescale_gradients", False),
+        "steps_per_print": ds_config_from_yaml.get("steps_per_print", args.log_freq),
+        "wall_clock_breakdown": ds_config_from_yaml.get("wall_clock_breakdown", False),
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+                "lr": args.lr,
+                "betas": [0.9, 0.95],
+                "eps": 1e-8,
+                "weight_decay": args.weight_decay
+            }
+        },
+        "scheduler": {
+            "type": "WarmupDecayLR",
+            "params": {
+                "warmup_min_lr": 0,
+                "warmup_max_lr": args.lr,
+                "warmup_num_steps": args.warmup_steps,
+                "total_num_steps": total_steps
+            }
+        },
+        "zero_optimization": ds_config_from_yaml.get("zero_optimization", {
+            "stage": 1,
+            "allgather_partitions": True,
+            "allgather_bucket_size": 5e8,
+            "reduce_scatter": True,
+            "reduce_bucket_size": 5e8,
+            "contiguous_gradients": True
+        }),
+        "bfloat16": ds_config_from_yaml.get("bfloat16", {"enabled": args.bf16}),
+        "fp16": ds_config_from_yaml.get("fp16", {"enabled": args.fp16}),
+        "activation_checkpointing": {
+            "partition_activations": args.activation_checkpoint,
+            "cpu_checkpointing": False,
+            "contiguous_memory_optimization": args.activation_checkpoint
+        },
+    }
+    
+    # Add tensorboard if configured
+    if ds_config_from_yaml.get("tensorboard", {}).get("enabled", False):
+        ds_config["tensorboard"] = ds_config_from_yaml["tensorboard"]
+    
+    # Add data_sampling if configured
+    if ds_config_from_yaml.get("data_sampling", {}).get("enabled", False):
+        ds_config["data_sampling"] = ds_config_from_yaml["data_sampling"]
+    
+    # Add zero_allow_untested_optimizer if configured
+    if "zero_allow_untested_optimizer" in ds_config_from_yaml:
+        ds_config["zero_allow_untested_optimizer"] = ds_config_from_yaml["zero_allow_untested_optimizer"]
+    
+    # If external DeepSpeed config file provided, load and merge (override auto values)
+    if args.deepspeed and os.path.exists(args.deepspeed):
+        print_rank_0(f"Loading DeepSpeed config from: {args.deepspeed}")
+        import json
+        with open(args.deepspeed, 'r') as f:
+            external_config = json.load(f)
+        
+        # Override with external config, but keep our computed values (replace "auto")
+        def merge_config(base, override):
+            """Recursively merge configs, skip 'auto' values"""
+            for key, value in override.items():
+                if isinstance(value, dict) and key in base and isinstance(base[key], dict):
+                    merge_config(base[key], value)
+                elif value != "auto":
+                    base[key] = value
+            return base
+        
+        ds_config = merge_config(ds_config, external_config)
+    
+    # Initialize DeepSpeed
+    model_engine, optimizer, _, lr_scheduler = deepspeed.initialize(
+        model=model,
+        config=ds_config,
+        model_parameters=model.parameters()
     )
-    
-    # Learning rate scheduler
-    total_steps = len(dataloader) * args.num_epochs
-    scheduler = get_lr_scheduler(optimizer, args.warmup_steps, total_steps)
-    
-    # Mixed precision
-    scaler = None
-    if args.fp16:
-        scaler = GradScaler()
     
     # Loss function
     criterion = MLMLoss(vocab_size=len(tokenizer))
     
-    # Load checkpoint (pretrained weights already loaded in build_model)
+    # Load checkpoint
     start_epoch = 0
     global_step = 0
     if args.checkpoint:
-        start_epoch, global_step = load_checkpoint(args.checkpoint, model, optimizer, scheduler)
+        start_epoch, global_step = load_checkpoint(model_engine, args)
         print_rank_0(f"Resumed from epoch {start_epoch}, step {global_step}")
     
     # TensorBoard
@@ -535,15 +538,15 @@ def main():
         writer = SummaryWriter(Path(args.output_dir) / "tensorboard")
     
     # Training loop
-    print_rank_0(f"Starting training: {args.num_epochs} epochs, {len(dataloader)} batches/epoch")
+    zero_stage = ds_config.get("zero_optimization", {}).get("stage", 1)
+    print_rank_0(f"Starting DeepSpeed training: {args.num_epochs} epochs, {len(dataloader)} batches/epoch")
+    print_rank_0(f"ZeRO stage: {zero_stage}, BF16: {args.bf16}, Activation Checkpoint: {args.activation_checkpoint}")
     
     for epoch in range(start_epoch, args.num_epochs):
-        if sampler is not None:
-            sampler.set_epoch(epoch)
+        sampler.set_epoch(epoch)
         
         avg_loss, avg_acc, global_step, epoch_time = train_epoch(
-            model, dataloader, optimizer, scheduler, scaler,
-            criterion, device, epoch, args, writer, global_step
+            model_engine, dataloader, criterion, device, epoch, args, writer, global_step
         )
         
         print_rank_0(
@@ -553,13 +556,12 @@ def main():
         )
         
         # Save epoch checkpoint
-        if rank == 0:
-            save_checkpoint(model, optimizer, scheduler, epoch + 1, global_step, args)
+        save_checkpoint(model_engine, epoch + 1, global_step, args)
     
     if writer is not None:
         writer.close()
     
-    print_rank_0("Training completed!")
+    print_rank_0("DeepSpeed training completed!")
 
 
 if __name__ == "__main__":

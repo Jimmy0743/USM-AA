@@ -1,4 +1,3 @@
-# Copyright (c) 2025, Tencent Inc. All rights reserved.
 # DNA Kmer Tokenizer - Standalone implementation without tgnn dependency
 import itertools as it
 import re

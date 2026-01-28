@@ -11,9 +11,9 @@ data:
   dataset_type: refseq
   
   # Data file paths
-  ref_file: path/to/hg38.fa
-  dna_file: null  # /path/to/dna.jsonl
-  n1kg_file: null  # /path/to/1kg.jsonl
+  ref_file: path/to/refseq.fasta
+  dna_file: # /path/to/dna.jsonl
+  n1kg_file: # /path/to/1kg.jsonl
   
   # Sequence parameters
   seq_len: 256
@@ -21,7 +21,9 @@ data:
   # Sampling weights for each data source (combined mode only)
   # Higher weight = more samples from that source
   sample_weights:
-    ref: 1.0    # Reference genome sampling weight
+    ref: 0.15    # Reference genome sampling weight
+    dna: 0.40
+    n1kg: 0.45
 
 # Model configuration
 model:
@@ -58,7 +60,7 @@ tokenizer:
 
 # Training configuration
 training:
-  batch_size: 80        # Per GPU batch size
+  batch_size: 320       # Per GPU batch size
   num_epochs: 20
   learning_rate: 1.0e-4
   weight_decay: 0.1
@@ -83,8 +85,29 @@ precision:
 logging:
   output_dir: ../models/usm-aa-100m
   log_freq: 5
-  save_freq: 100       # Save checkpoint every N steps
+  save_freq: 2000       # Save checkpoint every N steps
 
 # Distributed training
 distributed:
   backend: nccl
+
+# DeepSpeed configuration
+deepspeed:
+  bfloat16:
+    enabled: true
+  fp16:
+    enabled: false
+  data_sampling:
+    enabled: true
+  gradient_clipping: 0.5
+  prescale_gradients: false
+  steps_per_print: 1000
+  tensorboard:
+    enabled: true
+  zero_allow_untested_optimizer: true
+  zero_optimization:
+    stage: 1
+    contiguous_gradients: true
+    overlap_comm: true
+    reduce_scatter: true
+  wall_clock_breakdown: false

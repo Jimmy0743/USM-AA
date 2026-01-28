@@ -1,4 +1,3 @@
-# Copyright (c) 2025, Tencent Inc. All rights reserved.
 # Extract embeddings from USM-AA model
 # Usage similar to DNABERT-2:
 #   from embedding import USMAA

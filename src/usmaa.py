@@ -1,4 +1,3 @@
-# Copyright (c) 2025, Tencent Inc. All rights reserved.
 # HuggingFace compatible USM-AA model
 # Usage:
 #   from transformers import AutoModel, AutoConfig

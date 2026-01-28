@@ -1,4 +1,3 @@
-# Copyright (c) 2025, Tencent Inc. All rights reserved.
 # Pretraining Dataset - Standalone implementation without tgnn dependency
 import json
 import os

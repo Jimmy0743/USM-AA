@@ -5,87 +5,21 @@
 #   model = USMAAModel.from_pretrained("path/to/model", config=config, trust_remote_code=True)
 #   outputs = model(input_ids)
 #   hidden_states = outputs.last_hidden_state  # or outputs[0]
-
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union, List
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PreTrainedModel, PretrainedConfig
+from transformers import PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
-
-
-class USMAAConfig(PretrainedConfig):
-    """Configuration class for USM-AA model."""
-    model_type = "usm-aa"
-
-    def __init__(
-        self,
-        vocab_size: int = 512,
-        num_cigar_ops: int = 10,
-        num_chrs: int = 32,
-        embedding_dim: int = 768,
-        hidden_size: int = None,  # Alias for embedding_dim (HF compatibility)
-        num_layers: int = 12,
-        num_hidden_layers: int = None,  # Alias for num_layers (HF compatibility)
-        num_heads: int = 12,
-        num_attention_heads: int = None,  # Alias for num_heads (HF compatibility)
-        ffn_dim: int = None,
-        intermediate_size: int = None,  # Alias for ffn_dim (HF compatibility)
-        sliding_window_size: int = None,
-        norm_qk: bool = False,
-        use_gate: bool = True,
-        rotary_theta: float = 5_000_000,
-        dropout: float = 0.0,
-        hidden_dropout_prob: float = None,  # Alias for dropout (HF compatibility)
-        droppath: float = 0.0,
-        num_classes: int = None,
-        num_labels: int = None,  # Alias for num_classes (HF compatibility)
-        pooler: str = "attention",
-        pad_token_id: int = 2,  # Default pad token id
-        **kwargs
-    ):
-        super().__init__(pad_token_id=pad_token_id, **kwargs)
-        self.vocab_size = vocab_size
-        self.num_cigar_ops = num_cigar_ops
-        self.num_chrs = num_chrs
-        # Handle aliases for HF compatibility
-        self.embedding_dim = hidden_size or embedding_dim
-        self.hidden_size = self.embedding_dim
-        self.num_layers = num_hidden_layers or num_layers
-        self.num_hidden_layers = self.num_layers
-        self.num_heads = num_attention_heads or num_heads
-        self.num_attention_heads = self.num_heads
-        self.ffn_dim = intermediate_size or ffn_dim or self.embedding_dim * 4
-        self.intermediate_size = self.ffn_dim
-        self.sliding_window_size = sliding_window_size
-        self.norm_qk = norm_qk
-        self.use_gate = use_gate
-        self.rotary_theta = rotary_theta
-        self.dropout = hidden_dropout_prob if hidden_dropout_prob is not None else dropout
-        self.hidden_dropout_prob = self.dropout
-        self.droppath = droppath
-        self.num_classes = num_labels or num_classes
-        # Only set num_labels if num_classes is not None (avoid HF setter issue)
-        if self.num_classes is not None:
-            self.num_labels = self.num_classes
-        self.pooler = pooler
+from .module import RMSNorm, precompute_freqs_cis, MultiHeadAttention, DropPath
+from .configuration_usmaa import USMAAConfig
 
 
 @dataclass
 class USMAAModelOutput(ModelOutput):
     """Output type for USMAAModel."""
-    last_hidden_state: torch.FloatTensor = None
-    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
-    attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
-
-
-@dataclass 
-class USMAALMOutput(ModelOutput):
-    """Output type for USMAAModel with LM head."""
-    loss: Optional[torch.FloatTensor] = None
-    logits: torch.FloatTensor = None
     last_hidden_state: torch.FloatTensor = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
@@ -98,99 +32,6 @@ class USMAASequenceClassifierOutput(ModelOutput):
     logits: torch.FloatTensor = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        norm = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
-        return (x * norm).type_as(x) * self.weight
-
-
-def precompute_freqs_cis(position_ids, theta, dim):
-    """Compute rotary position embeddings."""
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, device=position_ids.device).float() / dim))
-    freqs = position_ids.unsqueeze(-1).float() * freqs.unsqueeze(0)
-    freqs_cos = freqs.cos().unsqueeze(-2)
-    freqs_sin = freqs.sin().unsqueeze(-2)
-    return torch.stack([freqs_cos, freqs_sin], dim=-1)
-
-
-def apply_discrete_rotary_emb(x, freqs_cis):
-    """Apply rotary embeddings to input tensor."""
-    x_reshape = x.float().reshape(*x.shape[:-1], -1, 2)
-    freqs_cos = freqs_cis[..., 0]
-    freqs_sin = freqs_cis[..., 1]
-    x_out = torch.stack([
-        x_reshape[..., 0] * freqs_cos - x_reshape[..., 1] * freqs_sin,
-        x_reshape[..., 1] * freqs_cos + x_reshape[..., 0] * freqs_sin,
-    ], dim=-1)
-    return x_out.flatten(-2).type_as(x)
-
-
-class MultiHeadAttention(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        bias: bool = False,
-        dropout: float = 0.0,
-        norm_qk: bool = False,
-        use_gate: bool = True,
-    ):
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.dropout = dropout
-        self.use_gate = use_gate
-
-        # QKV(G) projection
-        attn_dim = 4 * dim if use_gate else 3 * dim
-        self.c_attn = nn.Linear(dim, attn_dim, bias=bias)
-
-        self.norm_qk = norm_qk
-        if norm_qk:
-            self.norm_q = RMSNorm(self.head_dim)
-            self.norm_k = RMSNorm(self.head_dim)
-
-        self.c_proj = nn.Linear(dim, dim, bias=bias)
-
-    def forward(self, x, freqs_cis=None, attn_mask=None):
-        B, L, D = x.shape
-        if self.use_gate:
-            qkvg = self.c_attn(x).split([self.dim, self.dim, self.dim, self.dim], dim=-1)
-            q, k, v, g = [t.view(B, L, self.num_heads, self.head_dim) for t in qkvg]
-        else:
-            qkv = self.c_attn(x).split([self.dim, self.dim, self.dim], dim=-1)
-            q, k, v = [t.view(B, L, self.num_heads, self.head_dim) for t in qkv]
-            g = None
-
-        if self.norm_qk:
-            q = self.norm_q(q)
-            k = self.norm_k(k)
-
-        if freqs_cis is not None:
-            q = apply_discrete_rotary_emb(q, freqs_cis)
-            k = apply_discrete_rotary_emb(k, freqs_cis)
-
-        # [B, num_heads, L, head_dim]
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-        
-        y = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=attn_mask,
-            dropout_p=self.dropout if self.training else 0.0,
-        )
-        y = y.transpose(1, 2).contiguous().view(B, L, D)
-        if g is not None:
-            y = y * g.view(B, L, D).sigmoid()
-        y = F.dropout(self.c_proj(y), p=self.dropout, training=self.training)
-        return y
 
 
 class MLP(nn.Module):
@@ -211,55 +52,26 @@ class MLP(nn.Module):
 
 class TransformerBlock(nn.Module):
     def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        ffn_dim: int = None,
-        norm_qk: bool = False,
-        dropout: float = 0.0,
-        droppath: float = 0.0,
-        use_gate: bool = True,
+            self,
+            dim: int,
+            num_heads: int,
+            ffn_dim: int = None,
+            norm_qk: bool = False,
+            dropout: float = 0.0,
+            droppath: float = 0.0
     ):
         super().__init__()
-        self.attn = MultiHeadAttention(dim, num_heads, norm_qk=norm_qk, dropout=dropout, use_gate=use_gate)
+        self.attn = MultiHeadAttention(dim, num_heads, norm_qk=norm_qk, dropout=dropout)
         self.mlp = MLP(dim, ffn_dim, dropout=dropout)
         self.norm_attn = RMSNorm(dim)
         self.norm_mlp = RMSNorm(dim)
-        self.drop_path = droppath
+        self.drop_path = DropPath(droppath)
 
     def forward(self, x, freqs_cis=None, attn_mask=None):
         h = self.attn(self.norm_attn(x), freqs_cis=freqs_cis, attn_mask=attn_mask)
-        if self.drop_path > 0 and self.training:
-            h = F.dropout(h, p=self.drop_path, training=True)
-        x = x + h
-        x = x + self.mlp(self.norm_mlp(x))
+        x = x + self.drop_path(h)
+        x = x + self.drop_path(self.mlp(self.norm_mlp(x)))
         return x
-
-
-class AttentionPooling(nn.Module):
-    def __init__(self, dim: int, out_dim: int, num_heads: int = 8, dropout: float = 0.0):
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.query = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
-        self.kv_proj = nn.Linear(dim, 2 * dim, bias=False)
-        self.out_proj = nn.Linear(dim, out_dim, bias=False)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x, mask=None):
-        B, L, D = x.shape
-        q = self.query.expand(B, -1, -1).view(B, 1, self.num_heads, self.head_dim).transpose(1, 2)
-        kv = self.kv_proj(x).view(B, L, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        k, v = kv[0], kv[1]
-
-        attn_mask = None
-        if mask is not None:
-            attn_mask = mask[:, None, None, :].expand(-1, self.num_heads, 1, -1)
-            attn_mask = attn_mask.masked_fill(~attn_mask.bool(), float('-inf'))
-
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-        out = out.transpose(1, 2).contiguous().view(B, 1, D)
-        return self.out_proj(self.dropout(out)).squeeze(1)
 
 
 class USMAAPreTrainedModel(PreTrainedModel):
@@ -299,7 +111,6 @@ class USMAAModel(USMAAPreTrainedModel):
         super().__init__(config)
         self.config = config
         self.dim = config.embedding_dim
-
         self.embedding = nn.Embedding(config.vocab_size, self.dim)
         self.chr_embedding = nn.Embedding(config.num_chrs, self.dim, padding_idx=0)
         self.strand_embedding = nn.Embedding(2, self.dim)
@@ -323,17 +134,17 @@ class USMAAModel(USMAAPreTrainedModel):
         self.post_init()
 
     def forward(
-        self,
-        input_ids: torch.Tensor = None,
-        attention_mask: torch.Tensor = None,
-        position_ids: torch.Tensor = None,
-        chr_ids: torch.Tensor = None,
-        strand_ids: torch.Tensor = None,
-        cigar_ids: torch.Tensor = None,
-        token_ids: torch.Tensor = None,  # Alias for input_ids (backward compatibility)
-        output_hidden_states: bool = False,
-        output_attentions: bool = False,
-        return_dict: bool = True,
+            self,
+            input_ids: torch.Tensor = None,
+            attention_mask: torch.Tensor = None,
+            position_ids: torch.Tensor = None,
+            chr_ids: torch.Tensor = None,
+            strand_ids: torch.Tensor = None,
+            cigar_ids: torch.Tensor = None,
+            token_ids: torch.Tensor = None,  # Alias for input_ids (backward compatibility)
+            output_hidden_states: bool = False,
+            output_attentions: bool = False,
+            return_dict: bool = True,
     ) -> Union[Tuple, USMAAModelOutput]:
         """Forward pass.
         
@@ -357,18 +168,20 @@ class USMAAModel(USMAAPreTrainedModel):
             input_ids = token_ids
         if input_ids is None:
             raise ValueError("input_ids must be provided")
-        
+
         batch_size, seq_len = input_ids.shape
-        
-        # Auto-generate position_ids if not provided
+        if chr_ids is not None:
+            chr_ids = torch.zeros_like(input_ids, dtype=torch.long)
+
         if position_ids is None:
             position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
-        
+
         x = self.embedding(input_ids)
-        if chr_ids is not None:
-            x = x + self.chr_embedding(chr_ids)
+        x = x + self.chr_embedding(chr_ids)
+
         if strand_ids is not None:
             x = x + self.strand_embedding(strand_ids)
+
         if cigar_ids is not None:
             x = x + self.cigar_embedding(cigar_ids)
 
@@ -389,7 +202,7 @@ class USMAAModel(USMAAPreTrainedModel):
             x = layer(x, freqs_cis=freqs_cis, attn_mask=attn_mask)
 
         x = self.final_norm(x)
-        
+
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (x,)
 
@@ -403,16 +216,16 @@ class USMAAModel(USMAAPreTrainedModel):
         )
 
     def forward_mlm(
-        self,
-        input_ids: torch.Tensor = None,
-        attention_mask: torch.Tensor = None,
-        position_ids: torch.Tensor = None,
-        chr_ids: torch.Tensor = None,
-        strand_ids: torch.Tensor = None,
-        cigar_ids: torch.Tensor = None,
-        token_ids: torch.Tensor = None,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
+            self,
+            input_ids: torch.Tensor = None,
+            attention_mask: torch.Tensor = None,
+            position_ids: torch.Tensor = None,
+            chr_ids: torch.Tensor = None,
+            strand_ids: torch.Tensor = None,
+            cigar_ids: torch.Tensor = None,
+            token_ids: torch.Tensor = None,
+            output_hidden_states: bool = False,
+            return_dict: bool = True,
     ):
         """Forward pass with LM head logits (for MLM pretraining).
         
@@ -424,12 +237,12 @@ class USMAAModel(USMAAPreTrainedModel):
             input_ids = token_ids
         if input_ids is None:
             raise ValueError("input_ids must be provided")
-        
+
         batch_size, seq_len = input_ids.shape
-        
+
         if position_ids is None:
             position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
-        
+
         x = self.embedding(input_ids)
         if chr_ids is not None:
             x = x + self.chr_embedding(chr_ids)
@@ -456,7 +269,7 @@ class USMAAModel(USMAAPreTrainedModel):
 
         x = self.final_norm(x)
         logits = self.lm_head(x)
-        
+
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (x,)
 
@@ -467,16 +280,16 @@ class USMAAModel(USMAAPreTrainedModel):
 
     @torch.no_grad()
     def get_embeddings(
-        self,
-        input_ids: torch.Tensor = None,
-        token_ids: torch.Tensor = None,
-        position_ids: torch.Tensor = None,
-        chr_ids: torch.Tensor = None,
-        strand_ids: torch.Tensor = None,
-        cigar_ids: torch.Tensor = None,
-        attention_mask: torch.Tensor = None,
-        pooling: str = "mean",
-        layer: int = -1,
+            self,
+            input_ids: torch.Tensor = None,
+            token_ids: torch.Tensor = None,
+            position_ids: torch.Tensor = None,
+            chr_ids: torch.Tensor = None,
+            strand_ids: torch.Tensor = None,
+            cigar_ids: torch.Tensor = None,
+            attention_mask: torch.Tensor = None,
+            pooling: str = "mean",
+            layer: int = -1,
     ) -> torch.Tensor:
         """Extract embeddings from the model.
         
@@ -499,13 +312,13 @@ class USMAAModel(USMAAPreTrainedModel):
             input_ids = token_ids
         if input_ids is None:
             raise ValueError("input_ids must be provided")
-        
+
         batch_size, seq_len = input_ids.shape
-        
+
         # Auto-generate position_ids if not provided
         if position_ids is None:
             position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
-        
+
         x = self.embedding(input_ids)
         if chr_ids is not None:
             x = x + self.chr_embedding(chr_ids)
@@ -590,29 +403,29 @@ class USMAAForSequenceClassification(USMAAPreTrainedModel):
         self.post_init()
 
     def forward(
-        self,
-        input_ids: torch.Tensor = None,
-        attention_mask: torch.Tensor = None,
-        position_ids: torch.Tensor = None,
-        chr_ids: torch.Tensor = None,
-        strand_ids: torch.Tensor = None,
-        cigar_ids: torch.Tensor = None,
-        token_ids: torch.Tensor = None,
-        labels: torch.Tensor = None,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
+            self,
+            input_ids: torch.Tensor = None,
+            attention_mask: torch.Tensor = None,
+            position_ids: torch.Tensor = None,
+            chr_ids: torch.Tensor = None,
+            strand_ids: torch.Tensor = None,
+            cigar_ids: torch.Tensor = None,
+            token_ids: torch.Tensor = None,
+            labels: torch.Tensor = None,
+            output_hidden_states: bool = False,
+            return_dict: bool = True,
     ) -> Union[Tuple, USMAASequenceClassifierOutput]:
         # Handle input_ids alias
         if input_ids is None and token_ids is not None:
             input_ids = token_ids
         if input_ids is None:
             raise ValueError("input_ids must be provided")
-        
+
         batch_size, seq_len = input_ids.shape
-        
+
         if position_ids is None:
             position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
-        
+
         x = self.embedding(input_ids)
         if chr_ids is not None:
             x = x + self.chr_embedding(chr_ids)
@@ -638,7 +451,7 @@ class USMAAForSequenceClassification(USMAAPreTrainedModel):
             x = layer(x, freqs_cis=freqs_cis, attn_mask=attn_mask)
 
         x = self.final_norm(x)
-        
+
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (x,)
 
@@ -663,57 +476,3 @@ class USMAAForSequenceClassification(USMAAPreTrainedModel):
             hidden_states=all_hidden_states,
             attentions=None,
         )
-
-
-def convert_usmaa_to_hf(ckpt_path: str, output_dir: str, model_type: str = "usm-aa-100m"):
-    """Convert original USM-AA checkpoint to HuggingFace format.
-    
-    Args:
-        ckpt_path: Path to original checkpoint (.pt file)
-        output_dir: Output directory for HuggingFace model
-        model_type: One of "usm-aa-100m", "usm-aa-500m", "usm-aa-1b"
-    """
-    import os
-    
-    CONFIG_MAP = {
-        "usm-aa-100m": dict(num_layers=12, num_heads=12, embedding_dim=768, ffn_dim=4096, use_gate=True),
-        "usm-aa-500m": dict(num_layers=24, num_heads=20, embedding_dim=1280, ffn_dim=6912, use_gate=True),
-        "usm-aa-1b": dict(num_layers=36, num_heads=32, embedding_dim=1536, ffn_dim=8192, use_gate=True),
-    }
-    
-    mcfg = CONFIG_MAP[model_type]
-    config = USMAAConfig(
-        vocab_size=512,
-        embedding_dim=mcfg["embedding_dim"],
-        num_layers=mcfg["num_layers"],
-        num_heads=mcfg["num_heads"],
-        ffn_dim=mcfg["ffn_dim"],
-        use_gate=mcfg["use_gate"],
-    )
-    
-    model = USMAAModel(config)
-    
-    # Load original checkpoint
-    state_dict = torch.load(ckpt_path, map_location="cpu")
-    if "model" in state_dict:
-        state_dict = state_dict["model"]
-    
-    # Convert state dict keys if needed
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        # Remove "module." prefix if present (from DDP)
-        if k.startswith("module."):
-            k = k[7:]
-        new_state_dict[k] = v
-    
-    model.load_state_dict(new_state_dict, strict=False)
-    
-    # Save to HuggingFace format
-    os.makedirs(output_dir, exist_ok=True)
-    model.save_pretrained(output_dir)
-    config.save_pretrained(output_dir)
-    
-    print(f"Model saved to {output_dir}")
-    return model
-
-

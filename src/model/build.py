@@ -15,9 +15,6 @@ Usage:
         pretrained_path="model.safetensors"
     )
 """
-
-import os
-from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, Union
 
 import yaml
@@ -30,44 +27,30 @@ except ImportError:
     from usmaa import USMAAModel, USMAAConfig
     from tokenizer import build_tokenizer as _build_tokenizer
 
-
 # Model architecture configurations
 MODEL_CONFIGS = {
     "usm-aa-100m": dict(
-        num_layers=12, 
-        num_heads=12, 
-        embedding_dim=768, 
-        ffn_dim=4096, 
+        num_layers=12,
+        num_heads=12,
+        embedding_dim=768,
+        ffn_dim=4096,
         use_gate=True
     ),
     "usm-aa-500m": dict(
-        num_layers=24, 
-        num_heads=20, 
-        embedding_dim=1280, 
-        ffn_dim=6912, 
+        num_layers=24,
+        num_heads=20,
+        embedding_dim=1280,
+        ffn_dim=6912,
         use_gate=True
     ),
     "usm-aa-1b": dict(
-        num_layers=36, 
-        num_heads=32, 
-        embedding_dim=1536, 
-        ffn_dim=8192, 
+        num_layers=36,
+        num_heads=32,
+        embedding_dim=1536,
+        ffn_dim=8192,
         use_gate=True
     ),
 }
-
-
-def build_tokenizer(kmer: int = 6, dynamic: bool = True):
-    """Build tokenizer.
-    
-    Args:
-        kmer: K-mer size for tokenization
-        dynamic: Whether to use dynamic k-mer tokenization
-    
-    Returns:
-        tokenizer: Tokenizer instance
-    """
-    return _build_tokenizer(kmer=kmer, dynamic=dynamic)
 
 
 def load_config_from_yaml(config_path: str) -> Dict[str, Any]:
@@ -84,14 +67,14 @@ def load_config_from_yaml(config_path: str) -> Dict[str, Any]:
 
 
 def build_model_config(
-    vocab_size: int,
-    model_type: str = "usm-aa-100m",
-    dropout: float = 0.0,
-    droppath: float = 0.0,
-    norm_qk: bool = False,
-    rotary_theta: float = 5_000_000,
-    num_classes: Optional[int] = None,
-    **kwargs
+        vocab_size: int,
+        model_type: str = "usm-aa-100m",
+        dropout: float = 0.0,
+        droppath: float = 0.0,
+        norm_qk: bool = False,
+        rotary_theta: float = 5_000_000,
+        num_classes: Optional[int] = None,
+        **kwargs
 ) -> USMAAConfig:
     """Build USMAAConfig from model type and parameters.
     
@@ -110,9 +93,9 @@ def build_model_config(
     """
     if model_type not in MODEL_CONFIGS:
         raise ValueError(f"Unknown model type: {model_type}. Choose from {list(MODEL_CONFIGS.keys())}")
-    
+
     mcfg = MODEL_CONFIGS[model_type]
-    
+
     config = USMAAConfig(
         vocab_size=vocab_size,
         embedding_dim=mcfg["embedding_dim"],
@@ -127,15 +110,15 @@ def build_model_config(
         num_classes=num_classes,
         **kwargs
     )
-    
+
     return config
 
 
 def load_pretrained_weights(
-    model: USMAAModel, 
-    pretrained_path: str,
-    strict: bool = False,
-    verbose: bool = True
+        model: USMAAModel,
+        pretrained_path: str,
+        strict: bool = False,
+        verbose: bool = True
 ) -> int:
     """Load pretrained weights into model.
     
@@ -164,14 +147,14 @@ def load_pretrained_weights(
             state_dict = checkpoint['state_dict']
         else:
             state_dict = checkpoint
-    
+
     # Remove "module." prefix if present (from DDP)
     new_state_dict = {}
     for k, v in state_dict.items():
         if k.startswith("module."):
             k = k[7:]
         new_state_dict[k] = v
-    
+
     if strict:
         model.load_state_dict(new_state_dict, strict=True)
         num_loaded = len(new_state_dict)
@@ -180,7 +163,7 @@ def load_pretrained_weights(
         model_state = model.state_dict()
         loaded_keys = []
         skipped_keys = []
-        
+
         for key, value in new_state_dict.items():
             if key in model_state:
                 if model_state[key].shape == value.shape:
@@ -190,26 +173,26 @@ def load_pretrained_weights(
                     skipped_keys.append(f"{key} (shape mismatch: {value.shape} vs {model_state[key].shape})")
             else:
                 skipped_keys.append(f"{key} (not in model)")
-        
+
         model.load_state_dict(model_state)
         num_loaded = len(loaded_keys)
-        
+
         if verbose and skipped_keys:
             print(f"Skipped {len(skipped_keys)} keys: {skipped_keys[:5]}...")
-    
+
     if verbose:
         print(f"Loaded {num_loaded} weights from {pretrained_path}")
-    
+
     return num_loaded
 
 
 def build_model(
-    vocab_size: int,
-    model_type: str = "usm-aa-100m",
-    pretrained_path: Optional[str] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    dtype: Optional[torch.dtype] = None,
-    **config_kwargs
+        vocab_size: int,
+        model_type: str = "usm-aa-100m",
+        pretrained_path: Optional[str] = None,
+        device: Optional[Union[str, torch.device]] = None,
+        dtype: Optional[torch.dtype] = None,
+        **config_kwargs
 ) -> Tuple[USMAAModel, USMAAConfig]:
     """Build USMAAModel with optional pretrained weights.
     
@@ -227,27 +210,27 @@ def build_model(
     """
     config = build_model_config(vocab_size, model_type, **config_kwargs)
     model = USMAAModel(config)
-    
+
     if pretrained_path:
         load_pretrained_weights(model, pretrained_path)
-    
+
     if dtype is not None:
         model = model.to(dtype)
-    
+
     if device is not None:
         model = model.to(device)
-    
+
     return model, config
 
 
 def build_model_from_yaml(
-    config_path: str,
-    model_type: Optional[str] = None,
-    pretrained_path: Optional[str] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    dtype: Optional[torch.dtype] = None,
-    kmer: int = 6,
-    dynamic: bool = True,
+        config_path: str,
+        model_type: Optional[str] = None,
+        pretrained_path: Optional[str] = None,
+        device: Optional[Union[str, torch.device]] = None,
+        dtype: Optional[torch.dtype] = None,
+        kmer: int = 6,
+        dynamic: bool = True,
 ) -> Tuple[USMAAModel, Any, USMAAConfig]:
     """Build model and tokenizer from YAML config file.
     
@@ -276,24 +259,24 @@ def build_model_from_yaml(
     """
     # Load YAML config
     cfg = load_config_from_yaml(config_path)
-    
+
     # Build tokenizer
     tokenizer = build_tokenizer(kmer=kmer, dynamic=dynamic)
     vocab_size = len(tokenizer)
-    
+
     # Get model config from YAML
     model_cfg = cfg.get('model', {})
     _model_type = model_type or model_cfg.get('type', 'usm-aa-100m')
     _pretrained_path = pretrained_path or model_cfg.get('pretrained')
-    
+
     # Get training config for dropout etc.
     train_cfg = cfg.get('training', {})
     dropout = train_cfg.get('dropout', 0.0)
     droppath = train_cfg.get('droppath', 0.0)
-    
+
     # Get precision config
     prec_cfg = cfg.get('precision', {})
-    
+
     # Build model
     model, config = build_model(
         vocab_size=vocab_size,
@@ -304,7 +287,7 @@ def build_model_from_yaml(
         dropout=dropout,
         droppath=droppath,
     )
-    
+
     return model, tokenizer, config
 
 
@@ -323,4 +306,3 @@ def print_model_info(model: USMAAModel, config: USMAAConfig):
     print(f"FFN dim: {config.ffn_dim}")
     print(f"Num layers: {config.num_layers}")
     print(f"Num heads: {config.num_heads}")
-

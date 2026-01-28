@@ -50,14 +50,9 @@ python dataprocess/prepare_dna.py
 
 ## Training
 
-### DDP Training
+### Deepspeed Training
 ```bash
 bash train.sh
-```
-
-### DeepSpeed Training
-```bash
-bash train_deepspeed.sh
 ```
 
 ## Extract Embedding

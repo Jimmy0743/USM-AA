@@ -1,5 +1,4 @@
 # USM-AA: Alignment-Aware DNA Foundation Model
-# Standalone implementation without tgnn dependency
 
 from .usmaa import (
     USMAAConfig,

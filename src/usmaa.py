@@ -677,7 +677,6 @@ def convert_usmaa_to_hf(ckpt_path: str, output_dir: str, model_type: str = "usm-
     
     CONFIG_MAP = {
         "usm-aa-100m": dict(num_layers=12, num_heads=12, embedding_dim=768, ffn_dim=4096, use_gate=True),
-        "usm-aa-500m": dict(num_layers=24, num_heads=20, embedding_dim=1280, ffn_dim=6912, use_gate=True),
         "usm-aa-1b": dict(num_layers=36, num_heads=32, embedding_dim=1536, ffn_dim=8192, use_gate=True),
     }
     
@@ -716,68 +715,5 @@ def convert_usmaa_to_hf(ckpt_path: str, output_dir: str, model_type: str = "usm-
     print(f"Model saved to {output_dir}")
     return model
 
-
 if __name__ == "__main__":
-    # Example usage similar to DNABERT-2
-    print("=" * 50)
-    print("USM-AA HuggingFace Compatible Model Demo")
-    print("=" * 50)
-    
-    # Create config
-    config = USMAAConfig(
-        vocab_size=512,
-        embedding_dim=768,
-        num_layers=12,
-        num_heads=12,
-        num_classes=33,
-    )
-    
-    # Create model (like DNABERT-2)
-    model = USMAAModel(config)
-    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
-    
-    # Test forward pass (HuggingFace style)
-    batch_size, seq_len = 2, 128
-    input_ids = torch.randint(0, 512, (batch_size, seq_len))
-    
-    # Forward pass - returns USMAAModelOutput
-    outputs = model(input_ids)
-    hidden_states = outputs.last_hidden_state  # [batch, seq_len, hidden_dim]
-    # or use tuple indexing
-    hidden_states = outputs[0]
-    
-    print(f"Hidden states shape: {hidden_states.shape}")
-    
-    # Embedding with mean pooling (like DNABERT-2)
-    embedding_mean = torch.mean(hidden_states[0], dim=0)
-    print(f"Mean embedding shape: {embedding_mean.shape}")
-    
-    # Embedding with max pooling
-    embedding_max = torch.max(hidden_states[0], dim=0)[0]
-    print(f"Max embedding shape: {embedding_max.shape}")
-    
-    # Or use get_embeddings method
-    embedding = model.get_embeddings(input_ids, pooling="mean")
-    print(f"get_embeddings shape: {embedding.shape}")
-    
-    # Save and load (HuggingFace style)
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model.save_pretrained(tmpdir)
-        config.save_pretrained(tmpdir)
-        
-        # Load back
-        loaded_config = USMAAConfig.from_pretrained(tmpdir)
-        loaded_model = USMAAModel.from_pretrained(tmpdir, config=loaded_config)
-        print(f"\nModel saved and loaded successfully from {tmpdir}")
-    
-    # Test classification model
-    print("\n" + "=" * 50)
-    print("Sequence Classification Model Demo")
-    print("=" * 50)
-    
-    cls_model = USMAAForSequenceClassification(config)
-    labels = torch.randint(0, 33, (batch_size,))
-    outputs = cls_model(input_ids, labels=labels)
-    print(f"Loss: {outputs.loss.item():.4f}")
-    print(f"Logits shape: {outputs.logits.shape}")
+    main()

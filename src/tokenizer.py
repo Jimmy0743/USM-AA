@@ -1,4 +1,4 @@
-# DNA Kmer Tokenizer - Standalone implementation without tgnn dependency
+# DNA Kmer Tokenizer
 import itertools as it
 import re
 from typing import Optional, Union, List
@@ -268,46 +268,27 @@ def build_tokenizer(
     Args:
         kmer: K-mer length
         dynamic: Whether to support dynamic kmer
-        special_tokens: Additional special tokens
+        special_tokens: Special tokens list. If None, use default tokens.
         
     Returns:
         DNAKmerTokenizer instance
     """
-    default_special_tokens = [
-        "<pad>", "<mask>",
-        "<INS-S>", "<INS-E>",
-        "<DEL-S>", "<DEL-E>",
-        "<DUP-S>", "<DUP-E>",
-        "<INV-S>", "<INV-E>",
-        "<TRA-S>", "<TRA-E>",
-        "<5mC>",
-        "<R1>", "<R2>", "<R3>", "<R4>", "<R5>", "<R6>",
-    ]
-    if special_tokens:
-        default_special_tokens.extend(special_tokens)
+    if special_tokens is None:
+        # Default special tokens
+        special_tokens = [
+            "<pad>", "<mask>",
+            "<R1>", "<R2>", "<R3>", "<R4>", "<R5>", "<R6>",
+            "<R7>", "<R8>", "<R9>", "<R10>",
+            "<R11>", "<R12>", "<R13>", "<R14>",
+            "<R15>", "<R16>", "<R17>",
+        ]
     
     return DNAKmerTokenizer(
         kmer=kmer,
         dynamic=dynamic,
-        special_tokens=default_special_tokens,
+        special_tokens=special_tokens,
         with_special_tokens=True
     )
 
-
 if __name__ == "__main__":
-    # Test tokenizer
-    tokenizer = build_tokenizer(kmer=6, dynamic=True)
-    print(f"Vocab size: {len(tokenizer)}")
-    print(f"BOS: {tokenizer.bos}, EOS: {tokenizer.eos}, PAD: {tokenizer.pad}, MASK: {tokenizer.mask}")
-    
-    # Encoding test
-    seq = "ATCGATCGATCG"
-    tokens = tokenizer(seq, bos=True, eos=True)
-    print(f"Sequence: {seq}")
-    print(f"Tokens: {tokens}")
-    print(f"Decoded: {tokenizer.decode(tokens)}")
-    
-    # Reverse complement test
-    rc_tokens = [tokenizer.get_reverse_complement_token(t.item()) for t in tokens]
-    print(f"RC tokens: {rc_tokens}")
-    print(f"RC decoded: {tokenizer.decode(torch.tensor(rc_tokens[::-1]))}")
+    main()

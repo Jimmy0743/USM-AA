@@ -1,4 +1,4 @@
-"""Prepare DNA data without tgnn dependency."""
+"""Prepare DNA data."""
 import os
 import json
 import struct

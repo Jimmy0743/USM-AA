@@ -32,7 +32,7 @@ weight/
 logs/
 runs/
 wandb/
-
+tests/
 # Misc
 .DS_Store
 *.tmp

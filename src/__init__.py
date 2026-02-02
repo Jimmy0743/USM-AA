@@ -1,15 +1,13 @@
 # USM-AA: Alignment-Aware DNA Foundation Model
+<<<<<<< HEAD
 
+=======
+>>>>>>> master
 from .usmaa import (
     USMAAConfig,
     USMAAModel,
     USMAAForSequenceClassification,
     USMAAPreTrainedModel,
-    RMSNorm,
-    TransformerBlock,
-    MultiHeadAttention,
-    MLP,
-    AttentionPooling,
     precompute_freqs_cis,
 )
 

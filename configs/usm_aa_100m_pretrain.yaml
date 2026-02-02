@@ -1,0 +1,117 @@
+# USM-AA 1B Pretraining Configuration
+
+# Data configuration
+data:
+  # Dataset type: refseq | dna | 1kg | combined
+  # - refseq: Reference genome only (RefseqPretrainDataset)
+  # - dna: Multi-species DNA only (DNAPretrainDataset)
+  # - 1kg: 1000 Genomes variants only (Discrete1KGPretrainDataset)
+  # - combined: All available data sources (USMAAPretrainDataset)
+  dataset_type: refseq
+  
+  # Data file paths
+  ref_file: /apdcephfs_qy3/share_301997302/chenchenqin/buddy2/yangxu/aigp/projects/aabert/usmaa/data/ref.fasta
+  dna_file: # /path/to/dna.jsonl
+  n1kg_file: # /path/to/1kg.jsonl
+  
+  # Sequence parameters
+  seq_len: 256
+  
+  # Sampling weights for each data source (combined mode only)
+  # Higher weight = more samples from that source
+  sample_weights:
+    ref: 0.15    # Reference genome sampling weight
+    dna: 0.40
+    n1kg: 0.45
+
+# Model configuration
+model:
+  name: USMAAModel
+  type: usm-aa-100m  # usm-aa-100m, usm-aa-1b
+
+# Loss configuration
+loss:
+  name: mlm
+
+# Tokenizer configuration
+tokenizer:
+  kmer: 6
+  dynamic: true
+  special_tokens:
+    - <pad>
+    - <mask>
+    - <R1>
+    - <R2>
+    - <R3>
+    - <R4>
+    - <R5>
+    - <R6>
+    - <R7>
+    - <R8>
+    - <R9>
+    - <R10>
+    - <R11>
+    - <R12>
+    - <R13>
+    - <R14>
+    - <R15>
+    - <R16>
+    - <R17>
+<<<<<<<< HEAD:config/usmaa_100m_pretrain.yaml
+========
+    
+>>>>>>>> master:configs/usm_aa_100m_pretrain.yaml
+
+# Training configuration
+training:
+  batch_size: 40       # Per GPU batch size
+  num_epochs: 20
+  learning_rate: 1.0e-4
+  weight_decay: 0.1
+  warmup_steps: 10000
+  grad_clip: 1.0
+  mask_ratio: 0.15      # MLM mask ratio
+  rc_ratio: 0.3         # Reverse complement ratio
+
+# DataLoader configuration
+dataloader:
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: true
+
+# Precision configuration
+precision:
+  bf16: true           # Recommended to use bf16
+  fp16: false
+  activation_checkpoint: true  # Save memory
+
+# Logging and checkpointing
+logging:
+  output_dir: ../models/usm-aa-100m
+  log_freq: 5
+  save_freq: 20      # Save checkpoint every N steps
+
+# Distributed training
+distributed:
+  backend: nccl
+
+# DeepSpeed configuration
+deepspeed:
+  bfloat16:
+    enabled: true
+  fp16:
+    enabled: false
+  data_sampling:
+    enabled: true
+  gradient_clipping: 0.5
+  prescale_gradients: false
+  steps_per_print: 1000
+  tensorboard:
+    enabled: true
+  zero_allow_untested_optimizer: true
+  zero_optimization:
+    stage: 1
+    contiguous_gradients: true
+    overlap_comm: true
+    reduce_scatter: true
+  wall_clock_breakdown: false

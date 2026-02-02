@@ -1,8 +1,4 @@
 # USM-AA: Alignment-Aware DNA Foundation Model
-<<<<<<< HEAD
-
-=======
->>>>>>> master
 from .usmaa import (
     USMAAConfig,
     USMAAModel,

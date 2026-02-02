@@ -1,4 +1,5 @@
 # USM-AA 1B Pretraining Configuration
+# Standalone implementation without tgnn dependency
 
 # Data configuration
 data:
@@ -10,7 +11,7 @@ data:
   dataset_type: refseq
   
   # Data file paths
-  ref_file: /apdcephfs_qy3/share_301997302/chenchenqin/buddy2/yangxu/aigp/projects/aabert/usmaa/data/ref.fasta
+  ref_file: path/to/refseq.fasta
   dna_file: # /path/to/dna.jsonl
   n1kg_file: # /path/to/1kg.jsonl
   
@@ -26,12 +27,11 @@ data:
 
 # Model configuration
 model:
-  name: USMAAModel
-  type: usm-aa-100m  # usm-aa-100m, usm-aa-1b
-
-# Loss configuration
-loss:
-  name: mlm
+  type: usm-aa-100m  # usm-aa-100m, usm-aa-500m, usm-aa-1b
+  # Auto-configured parameters:
+  # - usm-aa-100m: num_layers=12, num_heads=12, embedding_dim=768, ffn_dim=4096, use_gate=True (~122M)
+  # - usm-aa-500m: num_layers=24, num_heads=20, embedding_dim=1280, ffn_dim=6912, use_gate=True (~500M)
+  # - usm-aa-1b: num_layers=36, num_heads=32, embedding_dim=1536, ffn_dim=8192, use_gate=True (~1B)
 
 # Tokenizer configuration
 tokenizer:
@@ -57,14 +57,11 @@ tokenizer:
     - <R15>
     - <R16>
     - <R17>
-<<<<<<<< HEAD:config/usmaa_100m_pretrain.yaml
-========
     
->>>>>>>> master:configs/usm_aa_100m_pretrain.yaml
 
 # Training configuration
 training:
-  batch_size: 40       # Per GPU batch size
+  batch_size: 320       # Per GPU batch size
   num_epochs: 20
   learning_rate: 1.0e-4
   weight_decay: 0.1
@@ -89,7 +86,7 @@ precision:
 logging:
   output_dir: ../models/usm-aa-100m
   log_freq: 5
-  save_freq: 20      # Save checkpoint every N steps
+  save_freq: 2000       # Save checkpoint every N steps
 
 # Distributed training
 distributed:

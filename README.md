@@ -8,6 +8,9 @@ DNA sequence pretrain model.
 conda create -n usmaa python=3.9 -y
 conda activate usmaa
 pip install -r requirements.txt
+
+#install flash attention
+pip install flash-attn --no-build-isolation
 ```
 
 ## Data Preparation

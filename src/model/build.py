@@ -21,11 +21,11 @@ import yaml
 import torch
 
 try:
-    from .usmaa import USMAAModel, USMAAConfig
-    from .tokenizer import build_tokenizer as _build_tokenizer
+    from .modeling_usmaa import USMAAModel
+    from .configuration_usmaa import USMAAConfig
 except ImportError:
-    from usmaa import USMAAModel, USMAAConfig
-    from tokenizer import build_tokenizer as _build_tokenizer
+    from modeling_usmaa import USMAAModel
+    from configuration_usmaa import USMAAConfig
 
 # Model architecture configurations
 MODEL_CONFIGS = {

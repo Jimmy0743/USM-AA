@@ -1,6 +1,15 @@
 # Copyright (c) 2026, Tencent Inc. All rights reserved.
 # Data: 2026/1/28 20:51
 # Author: chenchenqin
+from .dataset import (
+    RefseqPretrainDataset,
+    DNAPretrainDataset,
+    Discrete1KGPretrainDataset,
+    USMAAPretrainDataset,
+)
+from .dataset.pretrain_dataset import print_rank_0
+
+
 def build_dataset(args, tokenizer):
     """Build dataset based on config"""
     if args.dataset_type == 'refseq':

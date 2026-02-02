@@ -10,17 +10,18 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import save_file as save_safetensors
 
-from .model import USMAAModel, USMAAConfig
-from .dataset import (
-    USMAAPretrainDataset, RefseqPretrainDataset, DNAPretrainDataset,
-    Discrete1KGPretrainDataset, print_rank_0
-)
-from .build_model import (
-    build_tokenizer, build_model, build_model_config,
-    load_pretrained_weights, MODEL_CONFIGS, print_model_info
-)
+from src.model.modeling_usmaa import USMAAModel
+from src.model.configuration_usmaa import USMAAConfig
+from src.model.build import build_model, MODEL_CONFIGS, print_model_info
+from src.tokenizer.build import build_tokenizer
+from src.data.build import build_dataset
 
 
+def print_rank_0(msg):
+    """Print only on rank 0"""
+    rank = int(os.environ.get("RANK", 0))
+    if rank == 0:
+        print(msg)
 
 
 class MLMLoss(torch.nn.Module):

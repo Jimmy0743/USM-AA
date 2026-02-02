@@ -2,6 +2,7 @@ torch>=2.5.0
 torchvision>=0.20.0
 torchaudio>=2.5.0
 deepspeed>=0.14.0
+flash_attn>=2.7.0
 triton>=3.1.0
 numpy>=1.26.0
 pandas>=2.3.0

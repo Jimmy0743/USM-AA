@@ -1,4 +1,4 @@
-"""Prepare 1000 Genomes data without """
+"""Prepare 1000 Genomes data without tgnn dependency."""
 import os
 import sys
 import json
@@ -13,7 +13,7 @@ import pysam
 CHROMOSOMES = ["chr" + str(i) for i in range(1, 23)] + ["chrX"]
 
 
-# ============ VCF Parsing ============
+# ============ VCF Parsing (replacing tgnn.sci.parser.vcf_parsing) ============
 def parse_vcf(vcf_path):
     """Open and return a pysam VariantFile."""
     return pysam.VariantFile(vcf_path)

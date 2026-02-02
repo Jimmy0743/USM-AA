@@ -306,3 +306,9 @@ def print_model_info(model: USMAAModel, config: USMAAConfig):
     print(f"FFN dim: {config.ffn_dim}")
     print(f"Num layers: {config.num_layers}")
     print(f"Num heads: {config.num_heads}")
+<<<<<<< HEAD:src/build_model.py
+
+if __name__ == "__main__":
+    main()
+=======
+>>>>>>> master:src/model/build.py

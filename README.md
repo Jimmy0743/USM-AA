@@ -8,6 +8,8 @@ DNA sequence pretrain model.
 conda create -n usmaa python=3.9 -y
 conda activate usmaa
 pip install -r requirements.txt
+#install flash attention
+pip install flash-attn --no-build-isolation
 ```
 
 ## Data Preparation
@@ -50,27 +52,52 @@ python dataprocess/prepare_dna.py
 
 ## Training
 
-### Deepspeed Training
+Modify `CONFIG_NAME` in `train.sh` to switch between pretraining and finetuning:
+
+```bash
+# For pretraining (MLM)
+CONFIG_NAME="usmaa_100m_pretrain"
+
+# For finetuning (Classification/Regression)
+CONFIG_NAME="usmaa_100m_finetune"
+```
+
+Run training:
 ```bash
 bash train.sh
 ```
 
 ## Extract Embedding
 
-```python
-from embedding import USMAA
+Extract sequence embeddings with alignment information:
 
-model, tokenizer = USMAA.from_pretrained(
-    config_path="config.yaml", 
-    checkpoint_path="/path/to/model.safetensors",  # your model checkpoint
-    device="cuda"
-)
-
-dna = "ACGTAGCATCGGATCTATCTATCGACACTTGGTTATCGATCTACGAGCATCTCGTTAGC"
-inputs = tokenizer(dna, return_tensors='pt')
-hidden_states = model(inputs["input_ids"].to("cuda"))[0]
-
-# Mean pooling
-embedding = hidden_states.mean(dim=1)
-print(f"Embedding shape: {embedding.shape}")
+```bash
+bash embedding.sh
 ```
+
+### Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `SEQUENCE` | DNA sequence (e.g., 60bp → 10 tokens) |
+| `CHR_IDS` | Chromosome ID per token (1-22, 23=X, 24=Y, 0=unknown) |
+| `POSITIONS` | Genomic position (bp) per token |
+| `STRAND_IDS` | Strand per token (0=forward, 1=reverse) |
+| `CIGAR_IDS` | CIGAR operation per token (7=match) |
+
+### Token Alignment Format
+
+Each 6mer token needs corresponding alignment info. For a 60bp sequence:
+- Tokenized: `[BOS]` + 10 tokens + `[EOS]` = 12 tokens total
+- Each alignment array should have 12 values
+
+```bash
+# Example: chr1, positions 1000-1054, forward strand
+SEQUENCE="ACGTAGCATCGGATCTATCTATCGACACTTGGTTATCGATCTACGAGCATCTCGTTAGC"
+CHR_IDS="1,1,1,1,1,1,1,1,1,1,1,1"
+POSITIONS="0,1000,1006,1012,1018,1024,1030,1036,1042,1048,1054,248956422"
+STRAND_IDS="0,0,0,0,0,0,0,0,0,0,0,0"
+CIGAR_IDS="7,7,7,7,7,7,7,7,7,7,7,7"
+```
+
+CIGAR operations: `["M", "I", "D", "N", "S", "H", "P", "=", "X", "B"]` (index 7 = "=" match)

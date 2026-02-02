@@ -1,4 +1,4 @@
-"""Prepare reference genome data without tgnn dependency."""
+"""Prepare reference genome data ."""
 import os
 import json
 import struct

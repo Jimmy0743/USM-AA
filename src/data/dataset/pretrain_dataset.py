@@ -5,11 +5,37 @@ import numpy as np
 import pysam
 import torch
 from torch.utils.data import Dataset
-from .tokenizer import DNAKmerTokenizer, build_tokenizer
-from src.bio.molecular_constants import CIGAR_OPS, CHROM2ID, CHROM_LENGTHS
+from src.tokenizer import DNAKmerTokenizer, build_tokenizer
 from .jsonl_dataset import MMapIndexedJsonlDataset
 from .fasta_dataset import MMapIndexedFastaDataset
 from .utils import collate_dense_tensors, get_random_mask
+
+
+def print_rank_0(msg):
+    """Print only on rank 0"""
+    rank = int(os.environ.get("RANK", 0))
+    if rank == 0:
+        print(msg)
+
+
+# CIGAR operations
+CIGAR_OPS = ["M", "I", "D", "N", "S", "H", "P", "=", "X"]
+
+# Chromosome to ID mapping
+CHROM2ID = {f"chr{i}": i for i in range(1, 23)}
+CHROM2ID.update({"chrX": 23, "chrY": 24, "chrM": 25})
+
+# Chromosome lengths (approximate, GRCh38)
+CHROM_LENGTHS = {
+    "chr1": 248956422, "chr2": 242193529, "chr3": 198295559, "chr4": 190214555,
+    "chr5": 181538259, "chr6": 170805979, "chr7": 159345973, "chr8": 145138636,
+    "chr9": 138394717, "chr10": 133797422, "chr11": 135086622, "chr12": 133275309,
+    "chr13": 114364328, "chr14": 107043718, "chr15": 101991189, "chr16": 90338345,
+    "chr17": 83257441, "chr18": 80373285, "chr19": 58617616, "chr20": 64444167,
+    "chr21": 46709983, "chr22": 50818468, "chrX": 156040895, "chrY": 57227415,
+    "chrM": 16569
+}
+
 
 class PretrainDataset(Dataset):
     """Base class for pretraining datasets."""

@@ -58,7 +58,8 @@ class TransformerBlock(nn.Module):
             ffn_dim: int = None,
             norm_qk: bool = False,
             dropout: float = 0.0,
-            droppath: float = 0.0
+            droppath: float = 0.0,
+            use_gate: bool = True
     ):
         super().__init__()
         self.attn = MultiHeadAttention(dim, num_heads, norm_qk=norm_qk, dropout=dropout)
@@ -66,6 +67,7 @@ class TransformerBlock(nn.Module):
         self.norm_attn = RMSNorm(dim)
         self.norm_mlp = RMSNorm(dim)
         self.drop_path = DropPath(droppath)
+        self.use_gate = use_gate
 
     def forward(self, x, freqs_cis=None, attn_mask=None):
         h = self.attn(self.norm_attn(x), freqs_cis=freqs_cis, attn_mask=attn_mask)

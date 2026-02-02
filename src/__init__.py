@@ -1,19 +1,16 @@
 # USM-AA: Alignment-Aware DNA Foundation Model
-from .usmaa import (
-    USMAAConfig,
+from .model.modeling_usmaa import (
     USMAAModel,
     USMAAForSequenceClassification,
     USMAAPreTrainedModel,
     precompute_freqs_cis,
 )
+from .model.configuration_usmaa import USMAAConfig
 
-from .tokenizer import DNAKmerTokenizer, build_tokenizer, reverse_complement
+from .tokenizer import build_tokenizer
+from .tokenizer.kmer_tokenizer import DNAKmerTokenizer
 
-from .dataset import (
-    CIGAR_OPS,
-    CHROM2ID,
-    CHROM_LENGTHS,
-    print_rank_0,
+from .data.dataset import (
     collate_dense_tensors,
     get_random_mask,
     MMapIndexedJsonlDataset,
@@ -24,6 +21,7 @@ from .dataset import (
     RefseqPretrainDataset,
     USMAAPretrainDataset,
 )
+from .data.dataset.pretrain_dataset import CIGAR_OPS, CHROM2ID, CHROM_LENGTHS, print_rank_0
 
 __all__ = [
     # Model
@@ -35,7 +33,6 @@ __all__ = [
     # Tokenizer
     "DNAKmerTokenizer",
     "build_tokenizer",
-    "reverse_complement",
     # Constants
     "CIGAR_OPS",
     "CHROM2ID",

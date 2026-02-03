@@ -1,6 +1,4 @@
-# Copyright (c) 2026, Tencent Inc. All rights reserved.
-# Data: 2026/1/28 20:45
-# Author: chenchenqin
+
 import torch
 from src.model.modeling_usmaa import USMAAModel, USMAAConfig
 

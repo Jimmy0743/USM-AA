@@ -1,33 +1,33 @@
 # USM-AA 1B Pretraining Configuration
 
-# Data configuration
-data:
-  # Dataset type: refseq | dna | 1kg | combined
-  # - refseq: Reference genome only (RefseqPretrainDataset)
-  # - dna: Multi-species DNA only (DNAPretrainDataset)
-  # - 1kg: 1000 Genomes variants only (Discrete1KGPretrainDataset)
-  # - combined: All available data sources (USMAAPretrainDataset)
-  dataset_type: refseq
+# Dataset configuration
+dataset:
+  # Dataset type: RefseqPretrainDataset | DNAPretrainDataset | Discrete1KGPretrainDataset | USMAAPretrainDataset
+  type: USMAAPretrainDataset
   
   # Data file paths
-  ref_file: /path/to/ref.fasta
-  dna_file: # /path/to/dna.jsonl
-  n1kg_file: # /path/to/1kg.jsonl
+  train:
+    ref_file: path/to/ref.fasta
+    dna_file: path/to/dna.jsonl
+    n1kg_file: path/to/1kg.jsonl
+  
   
   # Sequence parameters
   seq_len: 256
   
   # Sampling weights for each data source (combined mode only)
-  # Higher weight = more samples from that source
   sample_weights:
     ref: 0.15    # Reference genome sampling weight
     dna: 0.40
     n1kg: 0.45
 
+loss:
+  name: mlm
+  
 # Model configuration
 model:
-  type: usm-aa-100m  # usm-aa-100m, usm-aa-1b
-  # Auto-configured parameters:
+  name: USMAAModel
+  type: usm-aa-100m  
   # - usm-aa-100m: num_layers=12, num_heads=12, embedding_dim=768, ffn_dim=4096, use_gate=True (~122M)
   # - usm-aa-1b: num_layers=36, num_heads=32, embedding_dim=1536, ffn_dim=8192, use_gate=True (~1B)
 
@@ -68,23 +68,26 @@ training:
   mask_ratio: 0.15      # MLM mask ratio
   rc_ratio: 0.3         # Reverse complement ratio
 
-# DataLoader configuration
+optimizer:
+  type: AdamW
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+
 dataloader:
   num_workers: 8
   prefetch_factor: 2
   pin_memory: true
 
-# Precision configuration
 precision:
-  bf16: true           # Recommended to use bf16
+  bf16: true           
   fp16: false
-  activation_checkpoint: true  # Save memory
+  activation_checkpoint: true  
 
 # Logging and checkpointing
 logging:
-  output_dir: ../models/usm-aa-100m
+  output_dir: ../models/usm-aa-100m-pretrain
   log_freq: 5
-  save_freq: 2000       # Save checkpoint every N steps
+  save_freq: 2000       
 
 # Distributed training
 distributed:

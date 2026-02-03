@@ -1,6 +1,4 @@
-# Copyright (c) 2026, Tencent Inc. All rights reserved.
-# Data: 2026/1/28 20:42
-# Author: chenchenqin
+
 from transformers import PretrainedConfig
 
 

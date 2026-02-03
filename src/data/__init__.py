@@ -1,4 +1,4 @@
-from .build import build_dataset
+from .build import build_dataset, build_finetune_dataset
 from .dataset import (
     collate_dense_tensors,
     get_random_mask,
@@ -9,4 +9,7 @@ from .dataset import (
     DNAPretrainDataset,
     RefseqPretrainDataset,
     USMAAPretrainDataset,
+    DenseDataset,
+    DenseAADataset,
+    NonContiguousDataset,
 )

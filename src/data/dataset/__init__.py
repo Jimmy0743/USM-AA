@@ -8,3 +8,6 @@ from .pretrain_dataset import (
     RefseqPretrainDataset,
     USMAAPretrainDataset,
 )
+from .dense_dataset import DenseDataset
+from .denseaa_dataset import DenseAADataset
+from .noncotiguous_dataset import NonContiguousDataset

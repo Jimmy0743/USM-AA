@@ -40,7 +40,7 @@ def get_registry(name):
 
 class Registry(dict):
     """
-    registry helper，提供注册接口
+    Registry helper, provides registration interface
     Eg. creeting a registry:
         some_registry = Registry({"default": default_module})
 

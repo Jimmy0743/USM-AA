@@ -6,6 +6,7 @@ import pysam
 import torch
 from torch.utils.data import Dataset
 from src.tokenizer import DNAKmerTokenizer, build_tokenizer
+from src.bio.molecular_constants import CHROM2ID, CHROM_LENGTHS, CIGAR_OPS
 from .jsonl_dataset import MMapIndexedJsonlDataset
 from .fasta_dataset import MMapIndexedFastaDataset
 from .utils import collate_dense_tensors, get_random_mask
@@ -16,25 +17,6 @@ def print_rank_0(msg):
     rank = int(os.environ.get("RANK", 0))
     if rank == 0:
         print(msg)
-
-
-# CIGAR operations
-CIGAR_OPS = ["M", "I", "D", "N", "S", "H", "P", "=", "X"]
-
-# Chromosome to ID mapping
-CHROM2ID = {f"chr{i}": i for i in range(1, 23)}
-CHROM2ID.update({"chrX": 23, "chrY": 24, "chrM": 25})
-
-# Chromosome lengths (approximate, GRCh38)
-CHROM_LENGTHS = {
-    "chr1": 248956422, "chr2": 242193529, "chr3": 198295559, "chr4": 190214555,
-    "chr5": 181538259, "chr6": 170805979, "chr7": 159345973, "chr8": 145138636,
-    "chr9": 138394717, "chr10": 133797422, "chr11": 135086622, "chr12": 133275309,
-    "chr13": 114364328, "chr14": 107043718, "chr15": 101991189, "chr16": 90338345,
-    "chr17": 83257441, "chr18": 80373285, "chr19": 58617616, "chr20": 64444167,
-    "chr21": 46709983, "chr22": 50818468, "chrX": 156040895, "chrY": 57227415,
-    "chrM": 16569
-}
 
 
 class PretrainDataset(Dataset):
@@ -396,13 +378,15 @@ class RefseqPretrainDataset(PretrainDataset):
 
 
 class USMAAPretrainDataset(Dataset):
-    """USM-AA pretraining dataset with weighted sampling from multiple sources."""
+    """USM-AA pretraining dataset with weighted sampling from multiple sources.
+    
+    Automatically detects available data files and uses only the ones that exist.
+    If only one data source is available, prints a warning message.
+    """
 
     def __init__(
             self,
-            ref_file: str,
-            dna_file: str = None,
-            n1kg_file: str = None,
+            train: dict = None,
             tokenizer: DNAKmerTokenizer = None,
             seq_len: int = 256,
             mask_ratio: float = 0.15,
@@ -411,9 +395,8 @@ class USMAAPretrainDataset(Dataset):
     ):
         """
         Args:
-            ref_file: Reference genome FASTA file path
-            dna_file: Multi-species DNA JSONL file path (optional)
-            n1kg_file: 1000 Genomes JSONL file path (optional)
+            train: Dict containing data file paths:
+                   {"ref_file": path, "dna_file": path, "n1kg_file": path}
             tokenizer: DNAKmerTokenizer instance
             seq_len: Sequence length
             mask_ratio: Mask ratio
@@ -434,7 +417,17 @@ class USMAAPretrainDataset(Dataset):
         if sample_weights is None:
             sample_weights = {"ref": 1.0, "dna": 1.0, "n1kg": 1.0}
 
-        # Build datasets
+        # Parse train dict to get individual file paths
+        if train is None:
+            train = {}
+        ref_file = train.get('ref_file')
+        dna_file = train.get('dna_file')
+        n1kg_file = train.get('n1kg_file')
+
+        # Check and build datasets - automatically detect available files
+        available_files = []
+        
+        # Check ref_file
         if ref_file and os.path.exists(ref_file):
             ds = RefseqPretrainDataset(
                 ref_file, tokenizer,
@@ -445,8 +438,12 @@ class USMAAPretrainDataset(Dataset):
             self.datasets.append(ds)
             self.dataset_names.append("ref")
             self.weights.append(sample_weights.get("ref", 1.0))
-            print_rank_0(f"RefseqPretrainDataset: {len(ds)} samples, weight={sample_weights.get('ref', 1.0)}")
+            available_files.append(("ref", ref_file))
+            print_rank_0(f"[Dataset] RefseqPretrainDataset loaded: {len(ds)} samples, weight={sample_weights.get('ref', 1.0)}")
+        elif ref_file:
+            print_rank_0(f"[Warning] ref_file not found: {ref_file}")
 
+        # Check dna_file
         if dna_file and os.path.exists(dna_file):
             ds = DNAPretrainDataset(
                 dna_file, tokenizer,
@@ -457,8 +454,12 @@ class USMAAPretrainDataset(Dataset):
             self.datasets.append(ds)
             self.dataset_names.append("dna")
             self.weights.append(sample_weights.get("dna", 1.0))
-            print_rank_0(f"DNAPretrainDataset: {len(ds)} samples, weight={sample_weights.get('dna', 1.0)}")
+            available_files.append(("dna", dna_file))
+            print_rank_0(f"[Dataset] DNAPretrainDataset loaded: {len(ds)} samples, weight={sample_weights.get('dna', 1.0)}")
+        elif dna_file:
+            print_rank_0(f"[Warning] dna_file not found: {dna_file}")
 
+        # Check n1kg_file
         if n1kg_file and os.path.exists(n1kg_file):
             ds = Discrete1KGPretrainDataset(
                 n1kg_file, tokenizer,
@@ -468,9 +469,23 @@ class USMAAPretrainDataset(Dataset):
             self.datasets.append(ds)
             self.dataset_names.append("n1kg")
             self.weights.append(sample_weights.get("n1kg", 1.0))
-            print_rank_0(f"Discrete1KGPretrainDataset: {len(ds)} samples, weight={sample_weights.get('n1kg', 1.0)}")
+            available_files.append(("n1kg", n1kg_file))
+            print_rank_0(f"[Dataset] Discrete1KGPretrainDataset loaded: {len(ds)} samples, weight={sample_weights.get('n1kg', 1.0)}")
+        elif n1kg_file:
+            print_rank_0(f"[Warning] n1kg_file not found: {n1kg_file}")
 
-        assert len(self.datasets) > 0, "No valid dataset found"
+        # Validate at least one dataset exists
+        assert len(self.datasets) > 0, "No valid dataset found! Please check your data file paths in train."
+
+        # Print warning if only one data source is available
+        if len(self.datasets) == 1:
+            print_rank_0("=" * 60)
+            print_rank_0(f"[!] Warning: Only one data source available: {available_files[0][0]}")
+            print_rank_0(f"[!] File: {available_files[0][1]}")
+            print_rank_0(f"[!] Training will proceed with this single data source.")
+            print_rank_0("=" * 60)
+        else:
+            print_rank_0(f"[Dataset] {len(self.datasets)} data sources available: {self.dataset_names}")
 
         # Compute dataset sizes and cumulative indices
         self.dataset_sizes = [len(ds) for ds in self.datasets]
@@ -481,8 +496,8 @@ class USMAAPretrainDataset(Dataset):
         total_weight = sum(self.weights)
         self.probs = [w / total_weight for w in self.weights]
 
-        print_rank_0(f"Total datasets: {len(self.datasets)}, Total samples: {self.total_size}")
-        print_rank_0(f"Sampling probabilities: {dict(zip(self.dataset_names, self.probs))}")
+        print_rank_0(f"[Dataset] Total samples: {self.total_size}")
+        print_rank_0(f"[Dataset] Sampling probabilities: {dict(zip(self.dataset_names, self.probs))}")
 
     def __len__(self):
         return self.total_size

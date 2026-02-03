@@ -21,11 +21,17 @@ import yaml
 import torch
 
 try:
-    from .modeling_usmaa import USMAAModel
+    from .modeling_usmaa import USMAAModel, USMAAForSequenceClassification
     from .configuration_usmaa import USMAAConfig
 except ImportError:
-    from modeling_usmaa import USMAAModel
+    from modeling_usmaa import USMAAModel, USMAAForSequenceClassification
     from configuration_usmaa import USMAAConfig
+
+# Model class registry
+MODEL_CLASSES = {
+    "USMAAModel": USMAAModel,
+    "USMAAForSequenceClassification": USMAAForSequenceClassification,
+}
 
 # Model architecture configurations
 MODEL_CONFIGS = {
@@ -189,27 +195,39 @@ def load_pretrained_weights(
 def build_model(
         vocab_size: int,
         model_type: str = "usm-aa-100m",
+        model_name: Optional[str] = None,
         pretrained_path: Optional[str] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: Optional[torch.dtype] = None,
         **config_kwargs
-) -> Tuple[USMAAModel, USMAAConfig]:
-    """Build USMAAModel with optional pretrained weights.
+) -> Tuple[Union[USMAAModel, USMAAForSequenceClassification], USMAAConfig]:
+    """Build USMAAModel or USMAAForSequenceClassification with optional pretrained weights.
     
     Args:
         vocab_size: Vocabulary size from tokenizer
         model_type: One of "usm-aa-100m", "usm-aa-500m", "usm-aa-1b"
+        model_name: Model class name - "USMAAModel" or "USMAAForSequenceClassification"
+                    If None, defaults to "USMAAModel"
         pretrained_path: Path to pretrained weights (optional)
         device: Device to load model to (optional)
         dtype: Data type for model (optional)
-        **config_kwargs: Additional config parameters
+        **config_kwargs: Additional config parameters (e.g., num_classes for classification)
     
     Returns:
-        model: USMAAModel instance
+        model: USMAAModel or USMAAForSequenceClassification instance
         config: USMAAConfig instance
     """
     config = build_model_config(vocab_size, model_type, **config_kwargs)
-    model = USMAAModel(config)
+    
+    # Select model class based on model_name
+    if model_name is None:
+        model_name = "USMAAModel"
+    
+    if model_name not in MODEL_CLASSES:
+        raise ValueError(f"Unknown model name: {model_name}. Choose from {list(MODEL_CLASSES.keys())}")
+    
+    model_class = MODEL_CLASSES[model_name]
+    model = model_class(config)
 
     if pretrained_path:
         load_pretrained_weights(model, pretrained_path)

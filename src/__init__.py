@@ -23,6 +23,9 @@ from .data.dataset import (
 )
 from .data.dataset.pretrain_dataset import CIGAR_OPS, CHROM2ID, CHROM_LENGTHS, print_rank_0
 
+# Evaluator
+from .evaluator import ClassificationEvaluator
+
 __all__ = [
     # Model
     "USMAAConfig",
@@ -49,4 +52,6 @@ __all__ = [
     "DNAPretrainDataset",
     "RefseqPretrainDataset",
     "USMAAPretrainDataset",
+    # Evaluator
+    "ClassificationEvaluator",
 ]

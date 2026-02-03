@@ -72,7 +72,7 @@ class TransformerBlock(nn.Module):
     def forward(self, x, freqs_cis=None, attn_mask=None):
         h = self.attn(self.norm_attn(x), freqs_cis=freqs_cis, attn_mask=attn_mask)
         x = x + self.drop_path(h)
-        x = x + self.drop_path(self.mlp(self.norm_mlp(x)))
+        x = x + self.mlp(self.norm_mlp(x))
         return x
 
 
@@ -172,14 +172,13 @@ class USMAAModel(USMAAPreTrainedModel):
             raise ValueError("input_ids must be provided")
 
         batch_size, seq_len = input_ids.shape
-        if chr_ids is not None:
-            chr_ids = torch.zeros_like(input_ids, dtype=torch.long)
 
         if position_ids is None:
             position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
 
         x = self.embedding(input_ids)
-        x = x + self.chr_embedding(chr_ids)
+        if chr_ids is not None:
+            x = x + self.chr_embedding(chr_ids)
 
         if strand_ids is not None:
             x = x + self.strand_embedding(strand_ids)
@@ -413,10 +412,13 @@ class USMAAForSequenceClassification(USMAAPreTrainedModel):
             strand_ids: torch.Tensor = None,
             cigar_ids: torch.Tensor = None,
             token_ids: torch.Tensor = None,
-            labels: torch.Tensor = None,
             output_hidden_states: bool = False,
             return_dict: bool = True,
-    ) -> Union[Tuple, USMAASequenceClassifierOutput]:
+            ) -> Union[Tuple, USMAASequenceClassifierOutput]:
+        """Forward pass for sequence classification.
+        
+        Loss is computed externally via criterion, not inside the model.
+        """
         # Handle input_ids alias
         if input_ids is None and token_ids is not None:
             input_ids = token_ids
@@ -464,16 +466,12 @@ class USMAAForSequenceClassification(USMAAPreTrainedModel):
             x = x.mean(1)
         logits = self.classifier(x)
 
-        loss = None
-        if labels is not None:
-            loss = F.cross_entropy(logits, labels)
-
         if not return_dict:
             output = (logits,) + (all_hidden_states,) if output_hidden_states else (logits,)
-            return ((loss,) + output) if loss is not None else output
+            return output
 
         return USMAASequenceClassifierOutput(
-            loss=loss,
+            loss=None,
             logits=logits,
             hidden_states=all_hidden_states,
             attentions=None,

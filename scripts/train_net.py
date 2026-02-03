@@ -1,189 +1,292 @@
+"""USM-AA training script with DeepSpeed.
+
+This script provides the main training loop for USM-AA models, supporting
+both pretraining (MLM) and fine-tuning (classification) tasks. It uses
+DeepSpeed for distributed training with ZeRO optimization.
+
+Example:
+    $ deepspeed train_net.py --config configs/usm_aa_100m_pretrain.yaml
+    $ deepspeed train_net.py --config configs/usmaa_100m_finetune.yaml --eval
+"""
 import argparse
 import os
-import time
 import yaml
 import deepspeed
 import torch
 from pathlib import Path
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
-
-# Local imports
-from src.model.build import build_model, print_model_info
+from src.model.build import build_model, load_pretrained_weights, print_model_info
 from src.tokenizer.build import build_tokenizer
-from src.data.build import build_dataset
-from src.engine.deepspeed import MLMLoss, train_epoch, save_checkpoint, load_checkpoint, print_rank_0
+from src.data.build import build_dataset, build_finetune_dataset
+from src.loss import build_loss
+from src.engine.deepspeed import (
+    train_epoch,
+    train_epoch_finetune,
+    save_checkpoint,
+    load_checkpoint,
+    print_rank_0
+)
+from src.evaluator import build_evaluator
 
 
-def get_args():
-    parser = argparse.ArgumentParser(description="USM-AA Pretraining with DeepSpeed")
-
-    # Config file
-    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
-
-    # Data arguments
-    parser.add_argument("--dataset_type", type=str, default=None,
-                        choices=["refseq", "dna", "1kg", "combined"],
-                        help="Dataset type: refseq, dna, 1kg, or combined")
-    parser.add_argument("--ref_file", type=str, default=None, help="Reference genome FASTA file")
-    parser.add_argument("--dna_file", type=str, default=None, help="Multi-species DNA JSONL file")
-    parser.add_argument("--n1kg_file", type=str, default=None, help="1KG variants JSONL file")
-    parser.add_argument("--seq_len", type=int, default=None, help="Sequence length")
-
-    # Model arguments
-    parser.add_argument("--model_type", type=str, default=None,
-                        choices=["usm-aa-100m", "usm-aa-500m", "usm-aa-1b"])
-    parser.add_argument("--checkpoint", type=str, default=None, help="Resume from checkpoint")
-
-    # Training arguments
-    parser.add_argument("--batch_size", type=int, default=None, help="Batch size per GPU")
-    parser.add_argument("--num_epochs", type=int, default=None, help="Number of epochs")
-    parser.add_argument("--lr", type=float, default=None, help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=None, help="Weight decay")
-    parser.add_argument("--warmup_steps", type=int, default=None, help="Warmup steps")
-    parser.add_argument("--grad_clip", type=float, default=None, help="Gradient clipping")
-    parser.add_argument("--mask_ratio", type=float, default=None, help="MLM mask ratio")
-    parser.add_argument("--rc_ratio", type=float, default=None, help="Reverse complement ratio")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
-
-    # System arguments
-    parser.add_argument("--num_workers", type=int, default=None, help="DataLoader workers")
-    parser.add_argument("--output_dir", type=str, default=None, help="Output directory")
-    parser.add_argument("--log_freq", type=int, default=None, help="Log frequency")
-    parser.add_argument("--save_freq", type=int, default=None, help="Save checkpoint frequency")
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16")
-    parser.add_argument("--fp16", action="store_true", help="Use float16")
-    parser.add_argument("--activation_checkpoint", action="store_true", help="Use activation checkpointing")
-
-    # DeepSpeed arguments
-    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
-    parser.add_argument("--deepspeed", type=str, default=None, help="DeepSpeed config file path")
+def get_args() -> argparse.Namespace:
+    """Parse command line arguments and load configuration.
+    
+    Returns:
+        Namespace containing all configuration parameters.
+        
+    Raises:
+        ValueError: If required configuration parameters are missing.
+    """
+    parser = argparse.ArgumentParser(description="USM-AA Training with DeepSpeed")
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to YAML configuration file"
+    )
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        help="Evaluation only mode (skip training)"
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from latest checkpoint"
+    )
+    parser.add_argument(
+        "--local_rank",
+        type=int,
+        default=-1,
+        help="Local rank for distributed training"
+    )
+    parser.add_argument(
+        "--deepspeed",
+        type=str,
+        default=None,
+        help="DeepSpeed config file path (optional, overrides yaml)"
+    )
 
     args = parser.parse_args()
 
-    # Load defaults from yaml config file
-    if args.config:
-        with open(args.config, 'r') as f:
-            cfg = yaml.safe_load(f)
+    # Load configuration from YAML
+    with open(args.config, 'r') as f:
+        cfg = yaml.safe_load(f)
+    
+    # Get config file directory for resolving relative paths
+    config_dir = os.path.dirname(os.path.abspath(args.config))
 
-        # Data config
-        data_cfg = cfg.get('data', {})
-        if args.dataset_type is None:
-            args.dataset_type = data_cfg.get('dataset_type', 'refseq')
-        if args.ref_file is None:
-            args.ref_file = data_cfg.get('ref_file')
-        if args.dna_file is None:
-            args.dna_file = data_cfg.get('dna_file')
-        if args.n1kg_file is None:
-            args.n1kg_file = data_cfg.get('n1kg_file')
-        if args.seq_len is None:
-            args.seq_len = data_cfg.get('seq_len', 256)
-        args.sample_weights = data_cfg.get('sample_weights', {"ref": 1.0})
+    # Dataset configuration
+    dataset_cfg = cfg.get('dataset', {})
+    args.dataset_type = dataset_cfg.get('type')
+    args.seq_len = dataset_cfg.get('seq_len')
+    args.sample_weights = dataset_cfg.get('sample_weights', {"ref": 1.0})
+    args.max_len = dataset_cfg.get('max_len')
+    args.num_classes = dataset_cfg.get('num_classes')
+    
+    # Parse data paths based on dataset_type
+    # - DenseDataset | DenseAADataset | NonContiguousDataset: use data_dir + files format
+    # - Others (pretrain): use train dict format {ref_file, dna_file, n1kg_file}
+    if args.dataset_type in ['DenseDataset', 'DenseAADataset', 'NonContiguousDataset']:
+        data_dir = dataset_cfg.get('data_dir')
+        # Resolve relative data_dir path
+        if data_dir and not os.path.isabs(data_dir):
+            data_dir = os.path.normpath(os.path.join(config_dir, data_dir))
+        files = dataset_cfg.get('files', {})
+        if data_dir and files:
+            args.train = os.path.join(data_dir, files.get('train')) if files.get('train') else None
+            args.dev = os.path.join(data_dir, files.get('dev')) if files.get('dev') else None
+            args.test = os.path.join(data_dir, files.get('test')) if files.get('test') else None
+        else:
+            raise ValueError(
+                "data_dir and files are required for DenseDataset/DenseAADataset/NonContiguousDataset"
+            )
+    else:
+        train_cfg_data = dataset_cfg.get('train', {})
+        # Resolve relative paths in train dict
+        if isinstance(train_cfg_data, dict):
+            for key in ['ref_file', 'dna_file', 'n1kg_file']:
+                if train_cfg_data.get(key) and not os.path.isabs(train_cfg_data[key]):
+                    train_cfg_data[key] = os.path.normpath(
+                        os.path.join(config_dir, train_cfg_data[key])
+                    )
+        args.train = train_cfg_data
+        args.dev = None
+        args.test = None
 
-        # Model config
-        model_cfg = cfg.get('model', {})
-        if args.model_type is None:
-            args.model_type = model_cfg.get('type', 'usm-aa-100m')
+    # Model configuration
+    model_cfg = cfg.get('model', {})
+    args.model_type = model_cfg.get('type')
+    args.checkpoint = model_cfg.get('checkpoint')
+    # Resolve relative checkpoint path
+    if args.checkpoint and not os.path.isabs(args.checkpoint):
+        args.checkpoint = os.path.normpath(os.path.join(config_dir, args.checkpoint))
+    args.model_name = model_cfg.get('name')
 
-        # Training config
-        train_cfg = cfg.get('training', {})
-        if args.batch_size is None:
-            args.batch_size = train_cfg.get('batch_size', 72)
-        if args.num_epochs is None:
-            args.num_epochs = train_cfg.get('num_epochs', 20)
-        if args.lr is None:
-            args.lr = train_cfg.get('learning_rate', 1e-4)
-        if args.weight_decay is None:
-            args.weight_decay = train_cfg.get('weight_decay', 0.1)
-        if args.warmup_steps is None:
-            args.warmup_steps = train_cfg.get('warmup_steps', 10000)
-        if args.grad_clip is None:
-            args.grad_clip = train_cfg.get('grad_clip', 1.0)
-        if args.mask_ratio is None:
-            args.mask_ratio = train_cfg.get('mask_ratio', 0.15)
-        if args.rc_ratio is None:
-            args.rc_ratio = train_cfg.get('rc_ratio', 0.3)
-        if args.gradient_accumulation_steps == 1:
-            args.gradient_accumulation_steps = train_cfg.get('gradient_accumulation_steps', 1)
+    # Loss configuration
+    args.loss = cfg.get('loss', None)
 
-        # DataLoader config
-        loader_cfg = cfg.get('dataloader', {})
-        if args.num_workers is None:
-            args.num_workers = loader_cfg.get('num_workers', 8)
+    # Training configuration
+    train_cfg = cfg.get('training', {})
+    args.batch_size = train_cfg.get('batch_size')
+    args.num_epochs = train_cfg.get('num_epochs')
+    args.lr = train_cfg.get('learning_rate')
+    args.weight_decay = train_cfg.get('weight_decay')
+    args.warmup_steps = train_cfg.get('warmup_steps')
+    args.warmup_ratio = train_cfg.get('warmup_ratio')
+    args.grad_clip = train_cfg.get('grad_clip', 1.0)
+    args.mask_ratio = train_cfg.get('mask_ratio')
+    args.rc_ratio = train_cfg.get('rc_ratio')
+    args.gradient_accumulation_steps = train_cfg.get('gradient_accumulation_steps', 1)
 
-        # Precision config
-        prec_cfg = cfg.get('precision', {})
-        if not args.bf16:
-            args.bf16 = prec_cfg.get('bf16', False)
-        if not args.fp16:
-            args.fp16 = prec_cfg.get('fp16', False)
-        if not args.activation_checkpoint:
-            args.activation_checkpoint = prec_cfg.get('activation_checkpoint', False)
+    # DataLoader configuration
+    loader_cfg = cfg.get('dataloader', {})
+    args.num_workers = loader_cfg.get('num_workers', 8)
 
-        # Logging config
-        log_cfg = cfg.get('logging', {})
-        if args.output_dir is None:
-            args.output_dir = log_cfg.get('output_dir', './output')
-        if args.log_freq is None:
-            args.log_freq = log_cfg.get('log_freq', 10)
-        if args.save_freq is None:
-            args.save_freq = log_cfg.get('save_freq', 5000)
+    # Precision configuration
+    prec_cfg = cfg.get('precision', {})
+    args.bf16 = prec_cfg.get('bf16', False)
+    args.fp16 = prec_cfg.get('fp16', False)
+    args.activation_checkpoint = prec_cfg.get('activation_checkpoint', False)
 
-    # Set defaults (if no config file and not specified via command line)
-    if args.dataset_type is None:
-        args.dataset_type = 'refseq'
-    if args.seq_len is None:
-        args.seq_len = 256
-    if not hasattr(args, 'sample_weights'):
-        args.sample_weights = {"ref": 1.0}
-    if args.model_type is None:
-        args.model_type = 'usm-aa-100m'
-    if args.batch_size is None:
-        args.batch_size = 72
-    if args.num_epochs is None:
-        args.num_epochs = 20
-    if args.lr is None:
-        args.lr = 1e-4
-    if args.weight_decay is None:
-        args.weight_decay = 0.1
-    if args.warmup_steps is None:
-        args.warmup_steps = 10000
-    if args.grad_clip is None:
-        args.grad_clip = 1.0
-    if args.mask_ratio is None:
-        args.mask_ratio = 0.15
-    if args.rc_ratio is None:
-        args.rc_ratio = 0.3
-    if args.num_workers is None:
-        args.num_workers = 8
-    if args.output_dir is None:
-        args.output_dir = './output'
-    if args.log_freq is None:
-        args.log_freq = 10
-    if args.save_freq is None:
-        args.save_freq = 5000
+    # Logging configuration
+    log_cfg = cfg.get('logging', {})
+    output_dir = log_cfg.get('output_dir', './output')
+    
+    # Resolve relative output_dir path
+    if not os.path.isabs(output_dir):
+        output_dir = os.path.normpath(os.path.join(config_dir, output_dir))
+    args.output_dir = output_dir
+    
+    args.log_freq = log_cfg.get('log_freq', 10)
+    save_freq = log_cfg.get('save_freq', None)
+    # If save_freq is 'none' or None, only save by epoch (not by steps)
+    args.save_freq = None if save_freq in ['none', 'None', None] else save_freq
+    args.save_best_only = log_cfg.get('save_best_only', False)
 
     # Validate required arguments
-    if args.dataset_type in ['refseq', 'combined'] and args.ref_file is None:
-        raise ValueError("--ref_file is required for refseq/combined dataset")
-    if args.dataset_type == 'dna' and args.dna_file is None:
-        raise ValueError("--dna_file is required for dna dataset")
-    if args.dataset_type == '1kg' and args.n1kg_file is None:
-        raise ValueError("--n1kg_file is required for 1kg dataset")
+    required_args = {
+        'dataset_type': args.dataset_type,
+        'model_type': args.model_type,
+        'model_name': args.model_name,
+        'batch_size': args.batch_size,
+        'num_epochs': args.num_epochs,
+        'lr': args.lr,
+        'weight_decay': args.weight_decay,
+        'output_dir': args.output_dir,
+    }
+    
+    missing_args = [k for k, v in required_args.items() if v is None]
+    if missing_args:
+        raise ValueError(
+            f"Missing required arguments: {missing_args}. Please specify in config file."
+        )
+
+    # Dataset-specific validation
+    train = args.train
+    if train is None:
+        raise ValueError("train is required in dataset config")
+    
+    if args.dataset_type == 'RefseqPretrainDataset':
+        if not isinstance(train, dict) or not train.get('ref_file'):
+            raise ValueError("train.ref_file is required for RefseqPretrainDataset")
+    elif args.dataset_type == 'DNAPretrainDataset':
+        if not isinstance(train, dict) or not train.get('dna_file'):
+            raise ValueError("train.dna_file is required for DNAPretrainDataset")
+    elif args.dataset_type == 'Discrete1KGPretrainDataset':
+        if not isinstance(train, dict) or not train.get('n1kg_file'):
+            raise ValueError("train.n1kg_file is required for Discrete1KGPretrainDataset")
+    elif args.dataset_type == 'USMAAPretrainDataset':
+        if not isinstance(train, dict) or not any([
+            train.get('ref_file'),
+            train.get('dna_file'),
+            train.get('n1kg_file')
+        ]):
+            raise ValueError(
+                "At least one data file (ref_file/dna_file/n1kg_file) is required "
+                "for USMAAPretrainDataset"
+            )
+    elif args.dataset_type in ['DenseDataset', 'DenseAADataset', 'NonContiguousDataset']:
+        if not isinstance(train, str):
+            raise ValueError(
+                "train must be a file path string for "
+                "DenseDataset/DenseAADataset/NonContiguousDataset"
+            )
 
     return args
 
 
-def main():
+@torch.no_grad()
+def evaluate(
+    model_engine,
+    dataloader: DataLoader,
+    evaluator,
+    device: torch.device,
+    args: argparse.Namespace
+) -> dict:
+    """Evaluate model on validation or test set.
+    
+    Args:
+        model_engine: DeepSpeed model engine.
+        dataloader: DataLoader for evaluation data.
+        evaluator: ClassificationEvaluator instance.
+        device: Device to run evaluation on.
+        args: Training arguments.
+    
+    Returns:
+        Dictionary containing evaluation metrics (loss, accuracy, f1, mcc).
+    """
+    model_engine.eval()
+    evaluator.reset()
+    
+    model_dtype = torch.bfloat16 if args.bf16 else (
+        torch.float16 if args.fp16 else torch.float32
+    )
+    
+    for batch_idx, (inputs, targets) in enumerate(dataloader):
+        # Move data to device
+        token_ids = inputs["token_ids"].to(device)
+        chr_ids = inputs["chr_ids"].to(device)
+        position_ids = inputs["position_ids"].to(device)
+        strand_ids = inputs["strand_ids"].to(device)
+        cigar_ids = inputs["cigar_ids"].to(device)
+        seq_mask = inputs["seq_mask"].to(device, dtype=model_dtype)
+        labels = targets["labels"].to(device)
+        
+        # Forward pass
+        outputs = model_engine.module.forward(
+            token_ids=token_ids,
+            position_ids=position_ids,
+            chr_ids=chr_ids,
+            strand_ids=strand_ids,
+            cigar_ids=cigar_ids,
+            attention_mask=seq_mask
+        )
+        logits = outputs.logits
+        
+        # Accumulate predictions
+        evaluator.add_batch(logits, labels, compute_loss=True)
+    
+    # Compute final metrics
+    metrics = evaluator.compute_metrics()
+    
+    model_engine.train()
+    return metrics
+
+
+def main() -> None:
+    """Main training entry point."""
     args = get_args()
 
-    # Load yaml config for deepspeed settings
+    # Load YAML config for DeepSpeed settings
     cfg = {}
     if args.config:
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
 
-    # DeepSpeed initialize distributed
+    # Initialize DeepSpeed distributed training
     deepspeed.init_distributed()
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -195,16 +298,39 @@ def main():
     if rank == 0:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
+    print_rank_0(f"Model: {args.model_name}")
+    print_rank_0(f"Dataset type: {args.dataset_type}")
+
     # Build tokenizer
-    tokenizer = build_tokenizer(kmer=6, dynamic=True)
+    tokenizer = build_tokenizer(args.config)
     print_rank_0(f"Tokenizer vocab size: {len(tokenizer)}")
 
-    # Build dataset
-    dataset = build_dataset(args, tokenizer)
+    # Build dataset based on type
+    pretrain_types = [
+        'RefseqPretrainDataset',
+        'DNAPretrainDataset',
+        'Discrete1KGPretrainDataset',
+        'USMAAPretrainDataset'
+    ]
+    finetune_types = ['DenseDataset', 'DenseAADataset', 'NonContiguousDataset']
+    
+    if args.dataset_type in pretrain_types:
+        dataset = build_dataset(args, tokenizer)
+        val_dataset = None
+    elif args.dataset_type in finetune_types:
+        dataset = build_finetune_dataset(args, tokenizer, split="train")
+        if args.dev:
+            val_dataset = build_finetune_dataset(args, tokenizer, split="val")
+        else:
+            val_dataset = None
+    else:
+        raise ValueError(
+            f"Unknown dataset_type: {args.dataset_type}. "
+            f"Available: {pretrain_types + finetune_types}"
+        )
 
-    # DataLoader
+    # Create training DataLoader
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -216,18 +342,60 @@ def main():
         prefetch_factor=2
     )
 
-    # Build model using build_model module
+    # Create validation DataLoader
+    val_dataloader = None
+    if val_dataset is not None:
+        val_sampler = DistributedSampler(
+            val_dataset, num_replicas=world_size, rank=rank, shuffle=False
+        )
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size * 2,
+            shuffle=False,
+            sampler=val_sampler,
+            num_workers=args.num_workers,
+            collate_fn=val_dataset.collate_fn,
+            pin_memory=True,
+            prefetch_factor=2
+        )
+
+    # Build model
     model, config = build_model(
         vocab_size=len(tokenizer),
         model_type=args.model_type,
+        model_name=args.model_name,
+        num_classes=args.num_classes,
     )
     print_model_info(model, config)
 
-    # Compute total_steps
+    # Load pretrained weights if specified
+    if args.checkpoint:
+        print_rank_0(f"Loading pretrained weights from: {args.checkpoint}")
+        load_pretrained_weights(model, args.checkpoint, strict=False)
+
+    # Compute total training steps
     total_steps = len(dataloader) * args.num_epochs // args.gradient_accumulation_steps
 
-    # DeepSpeed config - load from yaml if available
+    # Compute warmup steps
+    if args.warmup_steps is None and args.warmup_ratio is not None:
+        args.warmup_steps = int(total_steps * args.warmup_ratio)
+    elif args.warmup_steps is None:
+        args.warmup_steps = 0
+
+    # Build DeepSpeed configuration
     ds_config_from_yaml = cfg.get('deepspeed', {})
+    optimizer_cfg = cfg.get('optimizer', {})
+
+    optimizer_type = optimizer_cfg.get('type')
+    optimizer_betas = optimizer_cfg.get('betas')
+    optimizer_eps = optimizer_cfg.get('eps')
+    
+    if optimizer_type is None:
+        raise ValueError("optimizer.type must be specified in config")
+    if optimizer_betas is None:
+        raise ValueError("optimizer.betas must be specified in config")
+    if optimizer_eps is None:
+        raise ValueError("optimizer.eps must be specified in config")
 
     ds_config = {
         "train_batch_size": args.batch_size * world_size * args.gradient_accumulation_steps,
@@ -238,11 +406,11 @@ def main():
         "steps_per_print": ds_config_from_yaml.get("steps_per_print", args.log_freq),
         "wall_clock_breakdown": ds_config_from_yaml.get("wall_clock_breakdown", False),
         "optimizer": {
-            "type": "AdamW",
+            "type": optimizer_type,
             "params": {
                 "lr": args.lr,
-                "betas": [0.9, 0.95],
-                "eps": 1e-8,
+                "betas": optimizer_betas,
+                "eps": optimizer_eps,
                 "weight_decay": args.weight_decay
             }
         },
@@ -272,28 +440,23 @@ def main():
         },
     }
 
-    # Add tensorboard if configured
+    # Add optional DeepSpeed configurations
     if ds_config_from_yaml.get("tensorboard", {}).get("enabled", False):
         ds_config["tensorboard"] = ds_config_from_yaml["tensorboard"]
-
-    # Add data_sampling if configured
     if ds_config_from_yaml.get("data_sampling", {}).get("enabled", False):
         ds_config["data_sampling"] = ds_config_from_yaml["data_sampling"]
-
-    # Add zero_allow_untested_optimizer if configured
     if "zero_allow_untested_optimizer" in ds_config_from_yaml:
         ds_config["zero_allow_untested_optimizer"] = ds_config_from_yaml["zero_allow_untested_optimizer"]
 
-    # If external DeepSpeed config file provided, load and merge (override auto values)
+    # Merge external DeepSpeed config if provided
     if args.deepspeed and os.path.exists(args.deepspeed):
         print_rank_0(f"Loading DeepSpeed config from: {args.deepspeed}")
         import json
         with open(args.deepspeed, 'r') as f:
             external_config = json.load(f)
 
-        # Override with external config, but keep our computed values (replace "auto")
-        def merge_config(base, override):
-            """Recursively merge configs, skip 'auto' values"""
+        def merge_config(base: dict, override: dict) -> dict:
+            """Recursively merge configs, skipping 'auto' values."""
             for key, value in override.items():
                 if isinstance(value, dict) and key in base and isinstance(base[key], dict):
                     merge_config(base[key], value)
@@ -303,48 +466,260 @@ def main():
 
         ds_config = merge_config(ds_config, external_config)
 
-    # Initialize DeepSpeed
+    # Initialize DeepSpeed engine
     model_engine, optimizer, _, lr_scheduler = deepspeed.initialize(
         model=model,
         config=ds_config,
         model_parameters=model.parameters()
     )
 
-    # Loss function
-    criterion = MLMLoss(vocab_size=len(tokenizer))
+    # Build loss function
+    criterion = build_loss(args.config, vocab_size=len(tokenizer))
+    print_rank_0(f"Loss initialized: {type(criterion).__name__}")
 
-    # Load checkpoint
+    # Load checkpoint for resume or evaluation
     start_epoch = 0
     global_step = 0
-    if args.checkpoint:
-        start_epoch, global_step = load_checkpoint(model_engine, args)
-        print_rank_0(f"Resumed from epoch {start_epoch}, step {global_step}")
+    if args.resume or args.eval:
+        output_path = Path(args.output_dir)
+        checkpoints = []
+        
+        # Find best checkpoint
+        best_ckpt = output_path / "checkpoint_best"
+        if best_ckpt.exists():
+            checkpoints.append(("best", best_ckpt))
+        
+        # Find epoch checkpoints
+        for ckpt_dir in output_path.glob("checkpoint_epoch_*"):
+            if ckpt_dir.is_dir():
+                try:
+                    epoch_num = int(ckpt_dir.name.split("_")[-1])
+                    checkpoints.append((epoch_num, ckpt_dir))
+                except ValueError:
+                    continue
+        
+        if checkpoints:
+            if args.eval:
+                # Use best checkpoint for evaluation
+                best_checkpoints = [(e, p) for e, p in checkpoints if e == "best"]
+                if best_checkpoints:
+                    load_path = best_checkpoints[0][1]
+                else:
+                    epoch_checkpoints = [(e, p) for e, p in checkpoints if isinstance(e, int)]
+                    epoch_checkpoints.sort(key=lambda x: x[0], reverse=True)
+                    load_path = epoch_checkpoints[0][1]
+            else:
+                # Use latest epoch checkpoint for resume
+                epoch_checkpoints = [(e, p) for e, p in checkpoints if isinstance(e, int)]
+                epoch_checkpoints.sort(key=lambda x: x[0], reverse=True)
+                load_path = epoch_checkpoints[0][1] if epoch_checkpoints else checkpoints[0][1]
+            
+            print_rank_0(f"Loading checkpoint from: {load_path}")
+            try:
+                _, client_state = model_engine.load_checkpoint(
+                    str(output_path), str(load_path.name)
+                )
+                if client_state:
+                    start_epoch = client_state.get("epoch", 0)
+                    global_step = client_state.get("global_step", 0)
+                    print_rank_0(
+                        f"Checkpoint loaded: epoch={start_epoch}, global_step={global_step}"
+                    )
+            except Exception as e:
+                print_rank_0(f"Failed to load checkpoint: {e}")
+        else:
+            print_rank_0(f"No checkpoint found in {output_path}")
 
-    # TensorBoard
+    # Initialize TensorBoard
     writer = None
-    if rank == 0:
+    if rank == 0 and not args.eval:
         writer = SummaryWriter(Path(args.output_dir) / "tensorboard")
 
-    # Training loop
+    # Build evaluator if configured
+    evaluator = None
+    if cfg.get('evaluator'):
+        evaluator = build_evaluator(args.config)
+        print_rank_0(
+            f"Evaluator initialized: {type(evaluator).__name__}, "
+            f"best_metric={evaluator.best_metric_name}"
+        )
+
+    # ==================== Evaluation Only Mode ====================
+    if args.eval:
+        if evaluator is None:
+            raise ValueError("Evaluator must be configured in YAML for --eval mode")
+        
+        print_rank_0("=" * 50)
+        print_rank_0("Evaluation Only Mode")
+        print_rank_0("=" * 50)
+        
+        # Evaluate on validation set
+        if val_dataloader is not None:
+            print_rank_0("Evaluating on validation set...")
+            val_metrics = evaluate(model_engine, val_dataloader, evaluator, device, args)
+            print_rank_0(
+                f"Validation Results | Loss: {val_metrics['loss']:.4f} | "
+                f"Acc: {val_metrics['accuracy']:.4f} | F1: {val_metrics['f1']:.4f} | "
+                f"MCC: {val_metrics['mcc']:.4f}"
+            )
+            if rank == 0:
+                evaluator.save_results(val_metrics, args.output_dir, split="dev")
+        
+        # Evaluate on test set
+        if args.test:
+            print_rank_0("Evaluating on test set...")
+            test_dataset = build_finetune_dataset(args, tokenizer, split="test")
+            test_sampler = DistributedSampler(
+                test_dataset, num_replicas=world_size, rank=rank, shuffle=False
+            )
+            test_dataloader = DataLoader(
+                test_dataset,
+                batch_size=args.batch_size * 2,
+                shuffle=False,
+                sampler=test_sampler,
+                num_workers=args.num_workers,
+                collate_fn=test_dataset.collate_fn,
+                pin_memory=True,
+            )
+            test_metrics = evaluate(model_engine, test_dataloader, evaluator, device, args)
+            print_rank_0(
+                f"Test Results | Loss: {test_metrics['loss']:.4f} | "
+                f"Acc: {test_metrics['accuracy']:.4f} | F1: {test_metrics['f1']:.4f} | "
+                f"MCC: {test_metrics['mcc']:.4f}"
+            )
+            if rank == 0:
+                evaluator.save_results(test_metrics, args.output_dir, split="test")
+        
+        print_rank_0("Evaluation completed!")
+        return
+
+    # ==================== Training Mode ====================
     zero_stage = ds_config.get("zero_optimization", {}).get("stage", 1)
-    print_rank_0(f"Starting DeepSpeed training: {args.num_epochs} epochs, {len(dataloader)} batches/epoch")
-    print_rank_0(f"ZeRO stage: {zero_stage}, BF16: {args.bf16}, Activation Checkpoint: {args.activation_checkpoint}")
+    print_rank_0(
+        f"Starting DeepSpeed training: {args.num_epochs} epochs, "
+        f"{len(dataloader)} batches/epoch"
+    )
+    print_rank_0(
+        f"ZeRO stage: {zero_stage}, BF16: {args.bf16}, "
+        f"Activation Checkpoint: {args.activation_checkpoint}"
+    )
+    print_rank_0(f"Warmup steps: {args.warmup_steps}, Total steps: {total_steps}")
+
+    # Track best model
+    best_metric_value = -float('inf')
+    best_epoch = -1
+
+    # Create test DataLoader if test set is available
+    test_dataloader = None
+    if args.test and args.dataset_type in finetune_types:
+        test_dataset = build_finetune_dataset(args, tokenizer, split="test")
+        test_sampler = DistributedSampler(
+            test_dataset, num_replicas=world_size, rank=rank, shuffle=False
+        )
+        test_dataloader = DataLoader(
+            test_dataset,
+            batch_size=args.batch_size * 2,
+            shuffle=False,
+            sampler=test_sampler,
+            num_workers=args.num_workers,
+            collate_fn=test_dataset.collate_fn,
+            pin_memory=True,
+        )
+        print_rank_0(f"Test dataset loaded: {len(test_dataset)} samples")
 
     for epoch in range(start_epoch, args.num_epochs):
         sampler.set_epoch(epoch)
 
-        avg_loss, avg_acc, global_step, epoch_time = train_epoch(
-            model_engine, dataloader, criterion, device, epoch, args, writer, global_step
-        )
+        # Run training epoch
+        if args.dataset_type in finetune_types:
+            avg_loss, avg_acc, global_step, epoch_time = train_epoch_finetune(
+                model_engine, dataloader, criterion, device, epoch, args, writer, global_step
+            )
+        else:
+            avg_loss, avg_acc, global_step, epoch_time = train_epoch(
+                model_engine, dataloader, criterion, device, epoch, args, writer, global_step
+            )
 
         print_rank_0(
             f"Epoch {epoch} completed | "
-            f"Avg Loss: {avg_loss:.4f} | Avg Acc: {avg_acc:.4f} | "
+            f"Avg Loss: {avg_loss:.4f} | "
             f"Time: {epoch_time / 60:.1f}min"
         )
 
-        # Save epoch checkpoint
-        save_checkpoint(model_engine, epoch + 1, global_step, args)
+        # Run validation
+        if evaluator is not None and val_dataloader is not None:
+            val_metrics = evaluate(model_engine, val_dataloader, evaluator, device, args)
+            print_rank_0(
+                f"Validation | Loss: {val_metrics['loss']:.4f} | "
+                f"Acc: {val_metrics['accuracy']:.4f} | F1: {val_metrics['f1']:.4f} | "
+                f"MCC: {val_metrics['mcc']:.4f}"
+            )
+            
+            # Log to TensorBoard
+            if writer is not None:
+                writer.add_scalar("val/loss", val_metrics['loss'], epoch)
+                writer.add_scalar("val/accuracy", val_metrics['accuracy'], epoch)
+                writer.add_scalar("val/f1", val_metrics['f1'], epoch)
+                writer.add_scalar("val/mcc", val_metrics['mcc'], epoch)
+            
+            # Save best model
+            current_metric = val_metrics.get(evaluator.best_metric_name, val_metrics['f1'])
+            if current_metric > best_metric_value:
+                best_metric_value = current_metric
+                best_epoch = epoch
+                print_rank_0(
+                    f"New best model! {evaluator.best_metric_name}: {best_metric_value:.4f}"
+                )
+                save_checkpoint(model_engine, epoch + 1, global_step, args, suffix="_best")
+        
+        # Run test evaluation after each epoch (if test set available)
+        if test_dataloader is not None:
+            test_metrics = evaluate(model_engine, test_dataloader, evaluator, device, args)
+            print_rank_0(
+                f"Test | Loss: {test_metrics['loss']:.4f} | "
+                f"Acc: {test_metrics['accuracy']:.4f} | F1: {test_metrics['f1']:.4f} | "
+                f"MCC: {test_metrics['mcc']:.4f}"
+            )
+            
+            # Log test metrics to TensorBoard
+            if writer is not None:
+                writer.add_scalar("test/loss", test_metrics['loss'], epoch)
+                writer.add_scalar("test/accuracy", test_metrics['accuracy'], epoch)
+                writer.add_scalar("test/f1", test_metrics['f1'], epoch)
+                writer.add_scalar("test/mcc", test_metrics['mcc'], epoch)
+
+        # Save epoch checkpoint (skip if save_best_only is enabled)
+        if not args.save_best_only:
+            save_checkpoint(model_engine, epoch + 1, global_step, args)
+
+    # Final test evaluation with best model
+    if evaluator is not None and test_dataloader is not None and best_epoch >= 0:
+        print_rank_0("=" * 50)
+        print_rank_0("Final Test Evaluation with Best Model")
+        print_rank_0("=" * 50)
+        
+        # Load best checkpoint
+        best_ckpt_path = Path(args.output_dir) / "checkpoint_best"
+        if best_ckpt_path.exists():
+            print_rank_0(f"Loading best checkpoint from: {best_ckpt_path}")
+            model_engine.load_checkpoint(str(args.output_dir), "checkpoint_best")
+        
+        test_metrics = evaluate(model_engine, test_dataloader, evaluator, device, args)
+        print_rank_0(
+            f"Final Test Results (Best Model @ Epoch {best_epoch}) | "
+            f"Loss: {test_metrics['loss']:.4f} | "
+            f"Acc: {test_metrics['accuracy']:.4f} | F1: {test_metrics['f1']:.4f} | "
+            f"MCC: {test_metrics['mcc']:.4f}"
+        )
+        
+        # Save final test results
+        if rank == 0:
+            evaluator.save_results(
+                test_metrics,
+                args.output_dir,
+                split="test",
+                best_dev_metric=best_metric_value
+            )
 
     if writer is not None:
         writer.close()

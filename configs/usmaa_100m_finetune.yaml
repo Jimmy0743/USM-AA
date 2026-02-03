@@ -1,0 +1,115 @@
+# USM-AA 100M Fine-tuning Configuration
+
+dataset:
+  # Dataset type: DenseDataset | DenseAADataset | NonContiguousDataset
+  type: DenseAADataset
+  
+  # Data directory and files
+  data_dir: ../data/gue/tf/0
+  files:
+    train: train.jsonl
+    dev: dev.jsonl
+    test: test.jsonl
+  max_len: 512
+  num_classes: 2
+
+#classification/regression/mlm
+loss: 
+  name: classification  # classification | binary_classification 
+  num_classes: 2      
+
+# Model configuration
+model:
+  name: USMAAForSequenceClassification
+  type: usm-aa-100m
+  checkpoint: path/to/model.safetensors
+
+tokenizer:
+  kmer: 6
+  dynamic: true
+  special_tokens:
+    - <pad>
+    - <mask>
+    - <R1>
+    - <R2>
+    - <R3>
+    - <R4>
+    - <R5>
+    - <R6>
+    - <R7>
+    - <R8>
+    - <R9>
+    - <R10>
+    - <R11>
+    - <R12>
+    - <R13>
+    - <R14>
+    - <R15>
+    - <R16>
+    - <R17>
+
+# Training configuration
+training:
+  batch_size: 32
+  num_epochs: 10
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 100        
+  grad_clip: 1.0
+  early_stopping_patience: 5
+  eval_freq: none 
+  best_metric: mcc
+  dropout: 0.1 
+
+# Optimizer configuration
+optimizer:
+  type: AdamW
+  betas: [0.9, 0.999] 
+  eps: 1.0e-8
+
+# Evaluator configuration
+evaluator:
+  type: classification
+  threshold: null  # null = argmax,
+  batch_size: 64
+  num_workers: 4
+
+# DataLoader configuration
+dataloader:
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+
+# Precision configuration
+precision:
+  bf16: true
+  fp16: false
+  activation_checkpoint: false
+
+# Logging and checkpointing
+logging:
+  output_dir: ../models/usm-aa-100m-finetune
+  log_freq: 10
+  save_freq: none  # Save checkpoint every N steps
+  save_best_only: true
+
+# Distributed training
+distributed:
+  backend: nccl
+
+# DeepSpeed configuration
+deepspeed:
+  bfloat16:
+    enabled: true
+  fp16:
+    enabled: false
+  gradient_clipping: 1.0
+  prescale_gradients: false
+  steps_per_print: 1000
+  zero_allow_untested_optimizer: true
+  zero_optimization:
+    stage: 1
+    contiguous_gradients: true
+    overlap_comm: true
+    reduce_scatter: true
+  wall_clock_breakdown: false

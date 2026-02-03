@@ -1,7 +1,3 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023, Tencent Inc. All rights reserved.
-# Author: chenchenqin
-# Data: 2023/5/18 11:00
 import itertools as it
 import re
 import sys

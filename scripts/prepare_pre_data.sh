@@ -1,32 +1,38 @@
 #!/bin/bash
-# Data preparation script for USM-AA pretraining
-# Usage: bash prepare_data.sh [ref|dna|1kg|all]
+# Prepare pretrain datasets for USM-AA (process downloaded data)
+# Usage: bash prepare_pre_data.sh [ref|1kg|dna|all]
 
 set -e
 
 # ============ Configuration ============
 
+# Reference genome (required for alignment)
+REF_FILE="../data/reference/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna"
+
+# Base data directory (relative to scripts/)
+DATA_DIR="../data"
+
 # [ref] Reference genome preparation
-REF_INPUT="/path/to/grch38.fasta"
-REF_OUTPUT_DIR="../data"
+REF_INPUT="${DATA_DIR}/reference/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna"
+REF_OUTPUT_DIR="${DATA_DIR}"
 
 # [dna] DNA alignment data preparation
-DNA_INPUT="/path/to/dna_sequences.txt"
-DNA_REF="/path/to/grch38.fasta"
-DNA_OUTPUT_DIR="../data"
+DNA_INPUT="${DATA_DIR}/dna/train.txt"
+DNA_OUTPUT_DIR="${DATA_DIR}/dna"
 DNA_PRESET="sr"      # sr: short read, map-ont: ONT, map-hifi: PacBio HiFi
 DNA_BEST_N=10        # Number of best alignments to keep
 
 # [1kg] 1000 Genomes data preparation
-KG_VCF_DIR="/path/to/1kgenomes/vcf"
-KG_OUTPUT_DIR="../data"
+KG_VCF_DIR="${DATA_DIR}/1kg"
+KG_OUTPUT_DIR="${DATA_DIR}"
 KG_CHUNK_SIZE=4      # Number of samples per task
 KG_BATCH_SIZE=512    # Variants per document
 
 # =======================================
 
-# Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
 
 # Function to resolve relative path
 resolve_path() {
@@ -43,7 +49,7 @@ prepare_ref() {
     
     echo ""
     echo "=========================================="
-    echo "  📦 Preparing Reference Genome"
+    echo "  Preparing Reference Genome"
     echo "=========================================="
     echo "Input:  ${REF_INPUT}"
     echo "Output: ${output_dir}/ref.fasta"
@@ -53,31 +59,33 @@ prepare_ref() {
         --input "${REF_INPUT}" \
         --output_dir "${output_dir}"
     
-    echo "✅ Reference genome prepared!"
+    echo "Reference genome prepared!"
 }
 
 prepare_dna() {
     local output_dir
+    local input_file
     output_dir=$(resolve_path "${DNA_OUTPUT_DIR}")
+    input_file="${SCRIPT_DIR}/${DNA_INPUT}"
     
     echo ""
     echo "=========================================="
-    echo "  🧬 Preparing DNA Alignment Data"
+    echo "  Preparing DNA Alignment Data"
     echo "=========================================="
-    echo "Input:  ${DNA_INPUT}"
-    echo "Ref:    ${DNA_REF}"
+    echo "Input:  ${input_file}"
+    echo "Ref:    ${REF_FILE}"
     echo "Output: ${output_dir}/dna.jsonl"
     echo "Preset: ${DNA_PRESET}, Best N: ${DNA_BEST_N}"
     echo ""
     
     python "${SCRIPT_DIR}/prepare_dna.py" \
-        --input "${DNA_INPUT}" \
+        --input "${input_file}" \
         --output "${output_dir}/dna.jsonl" \
-        --ref "${DNA_REF}" \
+        --ref "${REF_FILE}" \
         --preset "${DNA_PRESET}" \
         --best_n "${DNA_BEST_N}"
     
-    echo "✅ DNA alignment data prepared!"
+    echo "DNA alignment data prepared!"
 }
 
 prepare_1kg() {
@@ -86,7 +94,7 @@ prepare_1kg() {
     
     echo ""
     echo "=========================================="
-    echo "  🌍 Preparing 1000 Genomes Data"
+    echo "  Preparing 1000 Genomes Data"
     echo "=========================================="
     echo "Input:  ${KG_VCF_DIR}"
     echo "Output: ${output_dir}/1kg.jsonl"
@@ -99,11 +107,11 @@ prepare_1kg() {
         --chunk_size "${KG_CHUNK_SIZE}" \
         --batch_size "${KG_BATCH_SIZE}"
     
-    echo "✅ 1000 Genomes data prepared!"
+    echo "1000 Genomes data prepared!"
 }
 
 show_help() {
-    echo "USM-AA Data Preparation Script"
+    echo "USM-AA Pretrain Data Preparation Script"
     echo ""
     echo "Usage: $0 [command]"
     echo ""
@@ -114,28 +122,10 @@ show_help() {
     echo "  all   Prepare all datasets"
     echo "  help  Show this help message"
     echo ""
-    echo "Configuration (edit at the top of this script):"
-    echo ""
-    echo "  [ref] Reference genome:"
-    echo "    REF_INPUT        Input FASTA file"
-    echo "    REF_OUTPUT_DIR   Output directory"
-    echo ""
-    echo "  [dna] DNA alignment:"
-    echo "    DNA_INPUT        Input sequences file"
-    echo "    DNA_REF          Reference genome for alignment"
-    echo "    DNA_OUTPUT_DIR   Output directory"
-    echo "    DNA_PRESET       Minimap2 preset (sr/map-ont/map-hifi)"
-    echo "    DNA_BEST_N       Number of best alignments"
-    echo ""
-    echo "  [1kg] 1000 Genomes:"
-    echo "    KG_VCF_DIR       VCF files directory"
-    echo "    KG_OUTPUT_DIR    Output directory"
-    echo "    KG_CHUNK_SIZE    Samples per task"
-    echo "    KG_BATCH_SIZE    Variants per document"
+    echo "Note: Run download_pre_data.sh first to download datasets."
     echo ""
 }
 
-# Parse command line arguments
 case "${1:-help}" in
     ref)
         prepare_ref
@@ -152,7 +142,7 @@ case "${1:-help}" in
         prepare_1kg
         echo ""
         echo "=========================================="
-        echo "  ✅ All Data Prepared Successfully!"
+        echo "  All Pretrain Data Prepared!"
         echo "=========================================="
         ;;
     help|--help|-h)
@@ -160,8 +150,7 @@ case "${1:-help}" in
         exit 0
         ;;
     *)
-        echo "❌ Unknown command: $1"
-        echo ""
+        echo "Unknown command: $1"
         show_help
         exit 1
         ;;

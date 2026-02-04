@@ -11,6 +11,47 @@ from .dataset import (
 from .dataset.pretrain_dataset import print_rank_0
 
 
+def get_cv_val_folds(cv: int, seed: int) -> list:
+    """Get validation fold IDs based on CV folds and seed.
+    
+    For 5-fold CV:
+        seed 0 -> val folds [0, 1]
+        seed 1 -> val folds [2, 3]
+        seed 2 -> val fold [4]
+    
+    For 10-fold CV:
+        seed 0 -> val fold [0]
+        seed 1 -> val fold [1]
+        ...
+        seed 9 -> val fold [9]
+    
+    Args:
+        cv: Number of CV folds (5 or 10)
+        seed: Random seed (0, 1, 2 for 5-fold; 0-9 for 10-fold)
+        
+    Returns:
+        List of fold IDs to use as validation set
+    """
+    if cv == 5:
+        # 5-fold: seed 0 -> [0,1], seed 1 -> [2,3], seed 2 -> [4]
+        if seed == 0:
+            return [0, 1]
+        elif seed == 1:
+            return [2, 3]
+        elif seed == 2:
+            return [4]
+        else:
+            raise ValueError(f"Invalid seed {seed} for 5-fold CV. Must be 0, 1, or 2.")
+    elif cv == 10:
+        # 10-fold: seed directly maps to fold
+        if 0 <= seed <= 9:
+            return [seed]
+        else:
+            raise ValueError(f"Invalid seed {seed} for 10-fold CV. Must be 0-9.")
+    else:
+        raise ValueError(f"Unsupported CV folds: {cv}. Must be 5 or 10.")
+
+
 def build_dataset(args, tokenizer):
     """Build dataset based on config
     
@@ -75,6 +116,8 @@ def build_finetune_dataset(args, tokenizer, split="train"):
             - test: path to test file (None if not available)
             - max_len: Maximum sequence length
             - sparse_k: Sparse sampling interval (for non_contiguous)
+            - cv: Number of CV folds (5 or 10, None for no CV)
+            - cv_seed: Seed for CV split selection
         tokenizer: DNAKmerTokenizer instance
         split: Dataset split ('train', 'val', 'test')
         
@@ -89,6 +132,20 @@ def build_finetune_dataset(args, tokenizer, split="train"):
     else:
         filename = args.test
     
+    # Handle cross-validation
+    cv = getattr(args, 'cv', None)
+    cv_seed = getattr(args, 'cv_seed', 0)
+    val_folds = None
+    
+    if cv is not None:
+        val_folds = get_cv_val_folds(cv, cv_seed)
+        print_rank_0(f"Cross-validation: {cv}-fold, seed={cv_seed}, val_folds={val_folds}")
+        # For CV, train and val both use the train file (cv.jsonl)
+        # train: all folds except val_folds
+        # val: val_folds only
+        if split in ["train", "val"]:
+            filename = args.train
+    
     max_len = getattr(args, 'max_len', 1024)
     rc_aug = getattr(args, 'rc_aug', True)
     
@@ -99,7 +156,8 @@ def build_finetune_dataset(args, tokenizer, split="train"):
             tokenizer=tokenizer,
             split=split,
             max_len=max_len,
-            rc_aug=rc_aug
+            rc_aug=rc_aug,
+            cv_val_folds=val_folds if cv else None
         )
     elif args.dataset_type == 'DenseAADataset':
         print_rank_0(f"Using DenseAADataset for {split}")
@@ -110,7 +168,8 @@ def build_finetune_dataset(args, tokenizer, split="train"):
             split=split,
             max_len=max_len,
             rc_aug=rc_aug,
-            use_alignment_prob=use_alignment_prob
+            use_alignment_prob=use_alignment_prob,
+            cv_val_folds=val_folds if cv else None
         )
     elif args.dataset_type == 'NonContiguousDataset':
         print_rank_0(f"Using NonContiguousDataset for {split}")
@@ -125,7 +184,8 @@ def build_finetune_dataset(args, tokenizer, split="train"):
             rc_aug=rc_aug,
             sparse_k=sparse_k,
             dense_prob=dense_prob,
-            use_alignment_prob=use_alignment_prob
+            use_alignment_prob=use_alignment_prob,
+            cv_val_folds=val_folds if cv else None
         )
     else:
         raise ValueError(f"Unknown finetune dataset_type: {args.dataset_type}")

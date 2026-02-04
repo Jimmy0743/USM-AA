@@ -1,15 +1,15 @@
-# USM-AA 1B Pretraining Configuration
+# USM-AA 100M Pretraining Configuration
 
 # Dataset configuration
 dataset:
   # Dataset type: RefseqPretrainDataset | DNAPretrainDataset | Discrete1KGPretrainDataset | USMAAPretrainDataset
   type: USMAAPretrainDataset
   
-  # Data file paths
+  # Data file paths (comment out or remove paths that don't exist)
   train:
-    ref_file: path/to/ref.fasta
-    dna_file: path/to/dna.jsonl
-    n1kg_file: path/to/1kg.jsonl
+    ref_file: ../data/reference/ref.fasta
+    # dna_file: path/to/dna.jsonl      # Uncomment and set path when data is ready
+    # n1kg_file: path/to/1kg.jsonl     # Uncomment and set path when data is ready
   
   
   # Sequence parameters

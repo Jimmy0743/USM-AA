@@ -25,6 +25,9 @@ class NonContiguousDataset(DenseAADataset):
     - Reducing computational cost while maintaining accuracy
     
     Data format (JSONL): Same as DenseAADataset
+    
+    For cross-validation (with fold_id):
+        {"sequence": "...", "label": 0, "alignments": [...], "fold_id": 0}
     """
 
     def __init__(
@@ -37,7 +40,8 @@ class NonContiguousDataset(DenseAADataset):
         rc_aug: bool = True,
         sparse_k: int = 4,
         dense_prob: float = 0.4,
-        use_alignment_prob: float = 0.8
+        use_alignment_prob: float = 0.8,
+        cv_val_folds: list = None
     ):
         """
         Args:
@@ -50,8 +54,9 @@ class NonContiguousDataset(DenseAADataset):
             sparse_k: Sampling interval for MATCH regions (keep every k-th token)
             dense_prob: Probability of using dense (vs sparse) representation during training
             use_alignment_prob: Probability of using alignment info during training
+            cv_val_folds: List of fold IDs to use as validation set (for CV mode)
         """
-        super().__init__(filename, tokenizer, split, max_len, chr_id, rc_aug, use_alignment_prob)
+        super().__init__(filename, tokenizer, split, max_len, chr_id, rc_aug, use_alignment_prob, cv_val_folds)
         self.sparse_k = sparse_k
         self.dense_prob = dense_prob
 
@@ -60,7 +65,8 @@ class NonContiguousDataset(DenseAADataset):
         if rank == 0:
             sparse_lens, dense_lens = [], []
             count = 0
-            for data in self.ds:
+            for i in range(len(self)):
+                data = self._get_item_by_idx(i)
                 if data.get("alignments"):
                     inputs_sparse = self.get_sparse_aa_inputs(data["alignments"][0])
                     inputs_dense = self.get_dense_aa_inputs(data["alignments"][0])
@@ -166,7 +172,7 @@ class NonContiguousDataset(DenseAADataset):
         return [token_ids, strand_ids, chr_ids, position_ids, cigar_ids]
 
     def __getitem__(self, index):
-        data = self.ds[index]
+        data = self._get_item_by_idx(index)
         label = data["label"]
         alignments = data.get("alignments", [])
 

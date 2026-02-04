@@ -5,7 +5,7 @@ dataset:
   type: DenseAADataset
   
   # Data directory and files
-  data_dir: ../data/gue/tf/0
+  data_dir: ../data/GUE/tf/0
   files:
     train: train.jsonl
     dev: dev.jsonl
@@ -22,7 +22,7 @@ loss:
 model:
   name: USMAAForSequenceClassification
   type: usm-aa-100m
-  checkpoint: path/to/model.safetensors
+  checkpoint: ../models/usmaa_100m/usmaa_100m.safetensors
 
 tokenizer:
   kmer: 6
@@ -88,8 +88,8 @@ precision:
 
 # Logging and checkpointing
 logging:
-  output_dir: ../models/usm-aa-100m-finetune
-  log_freq: 10
+  output_dir: ../models/usmaa_100m_gue_tf_0
+  log_freq: 5
   save_freq: none  # Save checkpoint every N steps
   save_best_only: true
 

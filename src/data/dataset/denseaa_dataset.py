@@ -5,28 +5,10 @@ import torch
 from torch.utils.data import Dataset
 
 from src.tokenizer import DNAKmerTokenizer
+from src.bio.molecular_constants import CHROM2ID, CHROM_LENGTHS
 from .jsonl_dataset import MMapIndexedJsonlDataset
 from .utils import collate_dense_tensors
 from .dense_dataset import DenseDataset, CIGAR_OPS, reverse_complement, print_rank_0
-
-
-# Chromosome to ID mapping
-CHROM2ID = {f"chr{i}": i for i in range(1, 23)}
-CHROM2ID.update({"chrX": 23, "chrY": 24, "chrM": 25})
-# Also support without 'chr' prefix
-CHROM2ID.update({str(i): i for i in range(1, 23)})
-CHROM2ID.update({"X": 23, "Y": 24, "M": 25})
-
-# Chromosome lengths (GRCh38)
-CHROM_LENGTHS = {
-    "chr1": 248956422, "chr2": 242193529, "chr3": 198295559, "chr4": 190214555,
-    "chr5": 181538259, "chr6": 170805979, "chr7": 159345973, "chr8": 145138636,
-    "chr9": 138394717, "chr10": 133797422, "chr11": 135086622, "chr12": 133275309,
-    "chr13": 114364328, "chr14": 107043718, "chr15": 101991189, "chr16": 90338345,
-    "chr17": 83257441, "chr18": 80373285, "chr19": 58617616, "chr20": 64444167,
-    "chr21": 46709983, "chr22": 50818468, "chrX": 156040895, "chrY": 57227415,
-    "chrM": 16569
-}
 
 
 class DenseAADataset(DenseDataset):
@@ -50,6 +32,9 @@ class DenseAADataset(DenseDataset):
                 ...
             ]
         }
+        
+    For cross-validation (with fold_id):
+        {"sequence": "...", "label": 0, "alignments": [...], "fold_id": 0}
     """
 
     def __init__(
@@ -60,7 +45,8 @@ class DenseAADataset(DenseDataset):
         max_len: int = 1024,
         chr_id: int = 0,
         rc_aug: bool = True,
-        use_alignment_prob: float = 0.8
+        use_alignment_prob: float = 0.8,
+        cv_val_folds: list = None
     ):
         """
         Args:
@@ -71,16 +57,18 @@ class DenseAADataset(DenseDataset):
             chr_id: Default chromosome ID for sequences without alignment
             rc_aug: Whether to use reverse complement augmentation
             use_alignment_prob: Probability of using alignment info during training
+            cv_val_folds: List of fold IDs to use as validation set (for CV mode)
         """
-        super().__init__(filename, tokenizer, split, max_len, chr_id, rc_aug)
+        super().__init__(filename, tokenizer, split, max_len, chr_id, rc_aug, cv_val_folds)
         self.use_alignment_prob = use_alignment_prob
 
         # Count samples with alignments
         rank = int(os.environ.get("RANK", 0))
         if rank == 0:
-            num_alignments = sum(1 for data in self.ds if len(data.get("alignments", [])) > 0)
-            print(f"DenseAADataset: alignments: {num_alignments}, total: {len(self.ds)}, "
-                  f"ratio: {num_alignments / len(self.ds):.4f}")
+            num_alignments = sum(1 for i in range(len(self)) 
+                               if len(self._get_item_by_idx(i).get("alignments", [])) > 0)
+            print(f"DenseAADataset: alignments: {num_alignments}, total: {len(self)}, "
+                  f"ratio: {num_alignments / len(self):.4f}")
 
     def get_dense_aa_inputs(self, alignment: dict):
         """Get dense AA input tensors from alignment.
@@ -123,7 +111,7 @@ class DenseAADataset(DenseDataset):
         return [token_ids, strand_ids, chr_ids, position_ids, cigar_ids]
 
     def __getitem__(self, index):
-        data = self.ds[index]
+        data = self._get_item_by_idx(index)
         label = data["label"]
         alignments = data.get("alignments", [])
 

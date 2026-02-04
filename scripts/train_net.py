@@ -4,9 +4,6 @@ This script provides the main training loop for USM-AA models, supporting
 both pretraining (MLM) and fine-tuning (classification) tasks. It uses
 DeepSpeed for distributed training with ZeRO optimization.
 
-Example:
-    $ deepspeed train_net.py --config configs/usm_aa_100m_pretrain.yaml
-    $ deepspeed train_net.py --config configs/usmaa_100m_finetune.yaml --eval
 """
 import argparse
 import os
@@ -86,6 +83,14 @@ def get_args() -> argparse.Namespace:
     args.max_len = dataset_cfg.get('max_len')
     args.num_classes = dataset_cfg.get('num_classes')
     
+    # Cross-validation configuration
+    # cv: number of folds (5 for 5-fold, 10 for 10-fold, None for no CV)
+    # seed: random seed, determines which fold(s) to use as validation
+    #   - 5-fold: seed 0 -> val folds [0,1], seed 1 -> val folds [2,3], seed 2 -> val fold [4]
+    #   - 10-fold: seed 0 -> val fold [0], seed 1 -> val fold [1], etc.
+    args.cv = dataset_cfg.get('cv', None)
+    args.cv_seed = dataset_cfg.get('seed', 0)
+    
     # Parse data paths based on dataset_type
     # - DenseDataset | DenseAADataset | NonContiguousDataset: use data_dir + files format
     # - Others (pretrain): use train dict format {ref_file, dna_file, n1kg_file}
@@ -140,6 +145,7 @@ def get_args() -> argparse.Namespace:
     args.mask_ratio = train_cfg.get('mask_ratio')
     args.rc_ratio = train_cfg.get('rc_ratio')
     args.gradient_accumulation_steps = train_cfg.get('gradient_accumulation_steps', 1)
+    args.early_stopping_patience = train_cfg.get('early_stopping_patience', None)
 
     # DataLoader configuration
     loader_cfg = cfg.get('dataloader', {})
@@ -319,7 +325,10 @@ def main() -> None:
         val_dataset = None
     elif args.dataset_type in finetune_types:
         dataset = build_finetune_dataset(args, tokenizer, split="train")
-        if args.dev:
+        # For CV mode, always create val_dataset from train file
+        if args.cv is not None:
+            val_dataset = build_finetune_dataset(args, tokenizer, split="val")
+        elif args.dev:
             val_dataset = build_finetune_dataset(args, tokenizer, split="val")
         else:
             val_dataset = None
@@ -482,53 +491,73 @@ def main() -> None:
     global_step = 0
     if args.resume or args.eval:
         output_path = Path(args.output_dir)
-        checkpoints = []
+        loaded = False
         
-        # Find best checkpoint
-        best_ckpt = output_path / "checkpoint_best"
-        if best_ckpt.exists():
-            checkpoints.append(("best", best_ckpt))
+        # For eval mode: first try to load from checkpoints/best_model.txt (safetensors format)
+        if args.eval:
+            ckpt_dir = output_path / "checkpoints"
+            tag_file = ckpt_dir / "best_model.txt"
+            if tag_file.exists():
+                with open(tag_file, 'r') as f:
+                    best_model_name = f.read().strip()
+                best_ckpt_path = ckpt_dir / best_model_name
+                if best_ckpt_path.exists():
+                    print_rank_0(f"Loading best model from tag file: {best_ckpt_path}")
+                    from safetensors.torch import load_file as load_safetensors
+                    state_dict = load_safetensors(str(best_ckpt_path))
+                    model_engine.module.load_state_dict(state_dict, strict=False)
+                    loaded = True
+                    print_rank_0(f"Successfully loaded checkpoint: {best_model_name}")
         
-        # Find epoch checkpoints
-        for ckpt_dir in output_path.glob("checkpoint_epoch_*"):
-            if ckpt_dir.is_dir():
-                try:
-                    epoch_num = int(ckpt_dir.name.split("_")[-1])
-                    checkpoints.append((epoch_num, ckpt_dir))
-                except ValueError:
-                    continue
-        
-        if checkpoints:
-            if args.eval:
-                # Use best checkpoint for evaluation
-                best_checkpoints = [(e, p) for e, p in checkpoints if e == "best"]
-                if best_checkpoints:
-                    load_path = best_checkpoints[0][1]
+        # Fallback: try DeepSpeed checkpoint format
+        if not loaded:
+            checkpoints = []
+            
+            # Find best checkpoint
+            best_ckpt = output_path / "checkpoint_best"
+            if best_ckpt.exists():
+                checkpoints.append(("best", best_ckpt))
+            
+            # Find epoch checkpoints
+            for ckpt_dir in output_path.glob("checkpoint_epoch_*"):
+                if ckpt_dir.is_dir():
+                    try:
+                        epoch_num = int(ckpt_dir.name.split("_")[-1])
+                        checkpoints.append((epoch_num, ckpt_dir))
+                    except ValueError:
+                        continue
+            
+            if checkpoints:
+                if args.eval:
+                    # Use best checkpoint for evaluation
+                    best_checkpoints = [(e, p) for e, p in checkpoints if e == "best"]
+                    if best_checkpoints:
+                        load_path = best_checkpoints[0][1]
+                    else:
+                        epoch_checkpoints = [(e, p) for e, p in checkpoints if isinstance(e, int)]
+                        epoch_checkpoints.sort(key=lambda x: x[0], reverse=True)
+                        load_path = epoch_checkpoints[0][1]
                 else:
+                    # Use latest epoch checkpoint for resume
                     epoch_checkpoints = [(e, p) for e, p in checkpoints if isinstance(e, int)]
                     epoch_checkpoints.sort(key=lambda x: x[0], reverse=True)
-                    load_path = epoch_checkpoints[0][1]
-            else:
-                # Use latest epoch checkpoint for resume
-                epoch_checkpoints = [(e, p) for e, p in checkpoints if isinstance(e, int)]
-                epoch_checkpoints.sort(key=lambda x: x[0], reverse=True)
-                load_path = epoch_checkpoints[0][1] if epoch_checkpoints else checkpoints[0][1]
-            
-            print_rank_0(f"Loading checkpoint from: {load_path}")
-            try:
-                _, client_state = model_engine.load_checkpoint(
-                    str(output_path), str(load_path.name)
-                )
-                if client_state:
-                    start_epoch = client_state.get("epoch", 0)
-                    global_step = client_state.get("global_step", 0)
-                    print_rank_0(
-                        f"Checkpoint loaded: epoch={start_epoch}, global_step={global_step}"
+                    load_path = epoch_checkpoints[0][1] if epoch_checkpoints else checkpoints[0][1]
+                
+                print_rank_0(f"Loading checkpoint from: {load_path}")
+                try:
+                    _, client_state = model_engine.load_checkpoint(
+                        str(output_path), str(load_path.name)
                     )
-            except Exception as e:
-                print_rank_0(f"Failed to load checkpoint: {e}")
-        else:
-            print_rank_0(f"No checkpoint found in {output_path}")
+                    if client_state:
+                        start_epoch = client_state.get("epoch", 0)
+                        global_step = client_state.get("global_step", 0)
+                        print_rank_0(
+                            f"Checkpoint loaded: epoch={start_epoch}, global_step={global_step}"
+                        )
+                except Exception as e:
+                    print_rank_0(f"Failed to load checkpoint: {e}")
+            else:
+                print_rank_0(f"No checkpoint found in {output_path}")
 
     # Initialize TensorBoard
     writer = None
@@ -608,6 +637,8 @@ def main() -> None:
     # Track best model
     best_metric_value = -float('inf')
     best_epoch = -1
+    best_models = []  # List of (metric_value, epoch, filepath)
+    epochs_without_improvement = 0  # Early stopping counter
 
     # Create test DataLoader if test set is available
     test_dataloader = None
@@ -662,15 +693,42 @@ def main() -> None:
                 writer.add_scalar("val/f1", val_metrics['f1'], epoch)
                 writer.add_scalar("val/mcc", val_metrics['mcc'], epoch)
             
-            # Save best model
+            # Save best model (keep top 2)
             current_metric = val_metrics.get(evaluator.best_metric_name, val_metrics['f1'])
-            if current_metric > best_metric_value:
-                best_metric_value = current_metric
-                best_epoch = epoch
-                print_rank_0(
-                    f"New best model! {evaluator.best_metric_name}: {best_metric_value:.4f}"
-                )
-                save_checkpoint(model_engine, epoch + 1, global_step, args, suffix="_best")
+            should_save = len(best_models) < 2 or current_metric > min(m[0] for m in best_models)
+            
+            if should_save and rank == 0:
+                from safetensors.torch import save_file as save_safetensors
+                ckpt_dir = Path(args.output_dir) / "checkpoints"
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Save with epoch naming
+                ckpt_path = ckpt_dir / f"model_epoch{epoch}.safetensors"
+                save_safetensors(model_engine.module.state_dict(), str(ckpt_path))
+                best_models.append((current_metric, epoch, ckpt_path))
+                
+                # Sort and keep top 2
+                best_models.sort(key=lambda x: x[0], reverse=True)
+                while len(best_models) > 2:
+                    _, _, old_path = best_models.pop()
+                    if old_path.exists():
+                        old_path.unlink()
+                
+                # Update tag file
+                tag_file = ckpt_dir / "best_model.txt"
+                with open(tag_file, 'w') as f:
+                    f.write(f"model_epoch{best_models[0][1]}.safetensors\n")
+                
+                if current_metric > best_metric_value:
+                    best_metric_value = current_metric
+                    best_epoch = epoch
+                    epochs_without_improvement = 0  # Reset counter
+                    print_rank_0(
+                        f"New best model! {evaluator.best_metric_name}: {best_metric_value:.4f}"
+                    )
+                else:
+                    epochs_without_improvement += 1
+                    print_rank_0(f"Saved checkpoint: {ckpt_path}")
         
         # Run test evaluation after each epoch (if test set available)
         if test_dataloader is not None:
@@ -691,6 +749,14 @@ def main() -> None:
         # Save epoch checkpoint (skip if save_best_only is enabled)
         if not args.save_best_only:
             save_checkpoint(model_engine, epoch + 1, global_step, args)
+        
+        # Early stopping check
+        if args.early_stopping_patience is not None and epochs_without_improvement >= args.early_stopping_patience:
+            print_rank_0(
+                f"Early stopping triggered! No improvement for {args.early_stopping_patience} epochs. "
+                f"Best {evaluator.best_metric_name}: {best_metric_value:.4f} at epoch {best_epoch}"
+            )
+            break
 
     # Final test evaluation with best model
     if evaluator is not None and test_dataloader is not None and best_epoch >= 0:
@@ -698,11 +764,18 @@ def main() -> None:
         print_rank_0("Final Test Evaluation with Best Model")
         print_rank_0("=" * 50)
         
-        # Load best checkpoint
-        best_ckpt_path = Path(args.output_dir) / "checkpoint_best"
-        if best_ckpt_path.exists():
-            print_rank_0(f"Loading best checkpoint from: {best_ckpt_path}")
-            model_engine.load_checkpoint(str(args.output_dir), "checkpoint_best")
+        # Load best checkpoint from tag file
+        ckpt_dir = Path(args.output_dir) / "checkpoints"
+        tag_file = ckpt_dir / "best_model.txt"
+        if tag_file.exists():
+            with open(tag_file, 'r') as f:
+                best_model_name = f.read().strip()
+            best_ckpt_path = ckpt_dir / best_model_name
+            if best_ckpt_path.exists():
+                print_rank_0(f"Loading best checkpoint from: {best_ckpt_path}")
+                from safetensors.torch import load_file as load_safetensors
+                state_dict = load_safetensors(str(best_ckpt_path))
+                model_engine.module.load_state_dict(state_dict, strict=False)
         
         test_metrics = evaluate(model_engine, test_dataloader, evaluator, device, args)
         print_rank_0(

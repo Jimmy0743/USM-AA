@@ -35,6 +35,9 @@ class DenseDataset(Dataset):
     
     Data format (JSONL):
         {"sequence": "ATCGATCG...", "label": 0}
+        
+    For cross-validation (with fold_id):
+        {"sequence": "ATCGATCG...", "label": 0, "fold_id": 0}
     """
 
     def __init__(
@@ -44,7 +47,8 @@ class DenseDataset(Dataset):
         split: str = "train",
         max_len: int = 1024,
         chr_id: int = 0,
-        rc_aug: bool = True
+        rc_aug: bool = True,
+        cv_val_folds: list = None
     ):
         """
         Args:
@@ -54,10 +58,31 @@ class DenseDataset(Dataset):
             max_len: Maximum sequence length
             chr_id: Chromosome ID (default 0 for unknown)
             rc_aug: Whether to use reverse complement augmentation during training
+            cv_val_folds: List of fold IDs to use as validation set (for CV mode)
+                         If provided, train split uses all folds except these,
+                         val split uses only these folds.
         """
         super().__init__()
-        self.ds = MMapIndexedJsonlDataset(filename, verbose=False)
-        print_rank_0(f"DenseDataset split: {split}\t{len(self.ds)}\t{filename}")
+        self._full_ds = MMapIndexedJsonlDataset(filename, verbose=False)
+        
+        # Filter by fold_id for cross-validation
+        self.indices = None
+        if cv_val_folds is not None:
+            self.indices = []
+            for i, data in enumerate(self._full_ds):
+                fold_id = data.get("fold_id", -1)
+                if split == "val":
+                    # Validation: only include val_folds
+                    if fold_id in cv_val_folds:
+                        self.indices.append(i)
+                else:
+                    # Train: exclude val_folds
+                    if fold_id not in cv_val_folds:
+                        self.indices.append(i)
+            print_rank_0(f"DenseDataset CV mode: split={split}, val_folds={cv_val_folds}, "
+                        f"filtered {len(self.indices)}/{len(self._full_ds)}")
+        
+        print_rank_0(f"DenseDataset split: {split}\t{len(self)}\t{filename}")
 
         self.max_len = max_len
         self.training = split in ("train", "trainval")
@@ -69,8 +94,21 @@ class DenseDataset(Dataset):
         self.cigar_pad_id = CIGAR_OPS.index("P")
         self.rc_aug = rc_aug
 
+    @property
+    def ds(self):
+        """Access dataset with optional index filtering for CV."""
+        return self
+    
+    def _get_item_by_idx(self, idx):
+        """Get item by actual index (accounting for CV filtering)."""
+        if self.indices is not None:
+            return self._full_ds[self.indices[idx]]
+        return self._full_ds[idx]
+
     def __len__(self):
-        return len(self.ds)
+        if self.indices is not None:
+            return len(self.indices)
+        return len(self._full_ds)
 
     def clip_tensors(self, tensors):
         """Clip tensors to max_len with random start during training."""
@@ -103,7 +141,7 @@ class DenseDataset(Dataset):
         return [token_ids, strand_ids, chr_ids, position_ids, cigar_ids]
 
     def __getitem__(self, index):
-        data = self.ds[index]
+        data = self._get_item_by_idx(index)
         label = data["label"]
 
         # Reverse complement augmentation during training

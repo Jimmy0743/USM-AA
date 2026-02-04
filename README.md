@@ -78,10 +78,10 @@ bash models/download.sh 1b
 bash models/download.sh all
 ```
 
-| Model | Parameters | Download |
-|-------|------------|----------|
-| USM-AA 100M | 107M | [Google Drive](https://drive.google.com/file/d/1AzskU3T7As_nHW0HzwcvfOmzDBm7pLGw/view) |
-| USM-AA 1B | 1B | [Google Drive](https://drive.google.com/file/d/1E3D4ty8QVHmzpascb7wcCWIrJe3af0RV/view) |
+| Model       | Download |
+|-------------|----------|
+| USM-AA 100M | [Google Drive](https://drive.google.com/file/d/1AzskU3T7As_nHW0HzwcvfOmzDBm7pLGw/view) |
+| USM-AA 1B   | [Google Drive](https://drive.google.com/file/d/1E3D4ty8QVHmzpascb7wcCWIrJe3af0RV/view) |
 
 ---
 

@@ -7,7 +7,7 @@ set -e
 # ============ Configuration ============
 
 # Reference genome (required for alignment)
-REF_FILE="/apdcephfs_qy3/share_301997302/chenchenqin/bio_datasets/usmaa/reference/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna"
+REF_FILE="../data/reference/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna"
 
 # Base data directory (relative to scripts/)
 DATA_DIR="../data"

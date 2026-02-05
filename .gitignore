@@ -17,10 +17,9 @@ models/
 *.ckpt
 weight/
 
-# Data
+# Data (large files)
 *.fa
 *.fasta
-*.jsonl
 
 # IDE
 .idea/

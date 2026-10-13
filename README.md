@@ -136,6 +136,8 @@ bash scripts/download_ft_data.sh all    # Download all
 | **Genomic Benchmarks** | [HuggingFace](https://huggingface.co/datasets/katarinagresova) |
 | **GUE** | [Google Drive](https://drive.google.com/file/d/1uOrwlf07qGQuruXqGXWMpPn8avBoW7T-/view) |
 | **NT Benchmark** | [HuggingFace](https://huggingface.co/datasets/InstaDeepAI/nucleotide_transformer_downstream_tasks_revised) |
+| **DNALongBench eQTL** | [Harvard Dataverse](https://doi.org/10.7910/DVN/YUP2G5) |
+| **DNALongBench ETGP** | [Harvard Dataverse](https://doi.org/10.7910/DVN/CTEQXX) |
 
 #### Process
 
@@ -145,6 +147,17 @@ bash scripts/prepare_ft_data.sh gue     # Process GUE dataset
 bash scripts/prepare_ft_data.sh nt      # Process NT benchmark (10-fold CV)
 bash scripts/prepare_ft_data.sh all     # Process all
 ```
+
+#### DNALongBench (eQTL & ETGP)
+
+[DNALongBench](https://github.com/wenduocheng/DNALongBench) is a benchmark for long-range DNA modeling. Its eQTL and ETGP tasks involve long-range gene expression regulation prediction (450k input length, evaluated with AUROC):
+
+| Task | Samples | Metric | Source |
+|------|---------|--------|--------|
+| **eQTL** | 31,282 | AUROC | [Harvard Dataverse (DVN/YUP2G5)](https://doi.org/10.7910/DVN/YUP2G5) |
+| **ETGP** | 2,602 | AUROC | [Harvard Dataverse (DVN/CTEQXX)](https://doi.org/10.7910/DVN/CTEQXX) |
+
+> Dataset entry point: https://tinyurl.com/dnalongbench (bundled download via Box)
 
 ### Configuration
 
